@@ -3,7 +3,10 @@ main = "src/index.ts"
 compatibility_date = "2025-10-24"
 account_id = "0959c8106f1a76b75307a8b48e4bce85"
 zone_id = "ff1f89d84b66526e5484cd9ad2ac684f"
-route = "https://api.chatter3.com/*"
+routes = [
+  { pattern = "api.chatter3.com/*", zone_name = "chatter3.com" }
+]
+
 
 [[d1_databases]]
 binding = "DB"
