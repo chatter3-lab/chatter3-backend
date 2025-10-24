@@ -2,13 +2,10 @@ name = "chatter3-backend"
 main = "src/index.ts"
 compatibility_date = "2025-10-24"
 account_id = "0959c8106f1a76b75307a8b48e4bce85"
-workers_dev = true
+zone_id = "ff1f89d84b66526e5484cd9ad2ac684f"
+route = "https://api.chatter3.com/*"
 
 [[d1_databases]]
 binding = "DB"
 database_name = "chatter3-db"
 database_id = "5db2dd9f-f9a4-4886-86f2-2cfc71ef4cc1"
-
-kv_namespaces = [
-  { binding = "CHATTER3_KV", id = "b7a3576b0de8484082d10c5af032c4d9" }
-]
