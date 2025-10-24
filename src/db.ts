@@ -1,3 +1,5 @@
+import { D1Database } from '@cloudflare/workers-types';
+
 export class DB {
   constructor(private db: D1Database) {}
 
