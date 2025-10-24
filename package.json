@@ -1,0 +1,29 @@
+{
+  "name": "chatter3-backend",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/chatter3-lab/chatter3-backend.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/chatter3-lab/chatter3-backend/issues"
+  },
+  "homepage": "https://github.com/chatter3-lab/chatter3-backend#readme",
+  "devDependencies": {
+    "wrangler": "^4.45.0"
+  },
+  "dependencies": {
+    "axios": "^1.12.2",
+    "itty-router": "^5.0.22",
+    "uuid": "^13.0.0"
+  }
+}
