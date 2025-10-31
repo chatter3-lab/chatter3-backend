@@ -4,6 +4,7 @@ import { users } from './routes/users';
 import { rooms } from './routes/rooms';
 import { messages } from './routes/messages';
 import { auth } from './routes/auth';
+import { matching } from './routes/matching';
 
 const app = new Hono<{ Bindings: { DB: D1Database; GOOGLE_CLIENT_ID: string } }>();
 
@@ -22,6 +23,7 @@ app.route('/api/users', users);
 app.route('/api/rooms', rooms);
 app.route('/api/messages', messages);
 app.route('/api/auth', auth);
+app.route('/api/matching', matching);
 
 // Health check
 app.get('/', (c) => c.text('Chatter3 Backend ✅'));
