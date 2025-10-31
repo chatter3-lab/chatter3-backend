@@ -1,17 +1,31 @@
 import { Hono } from 'hono';
-import { DB } from '../db';
 
 export const users = new Hono<{ Bindings: { DB: D1Database } }>();
 
 users.get('/', async (c) => {
-  const db = new DB(c.env.DB);
-  const res = await db.allUsers();
-  return c.json(res.results);
+  try {
+    const result = await c.env.DB.prepare(
+      "SELECT * FROM users"
+    ).all();
+    return c.json(result.results || []);
+  } catch (error) {
+    console.error('Database error:', error);
+    return c.json({ error: 'Internal Server Error' }, 500);
+  }
 });
 
 users.post('/', async (c) => {
-  const { username } = await c.req.json();
-  const db = new DB(c.env.DB);
-  await db.createUser(username);
-  return c.json({ message: 'User created' });
+  try {
+    const { username } = await c.req.json();
+    const id = crypto.randomUUID();
+    
+    await c.env.DB.prepare(
+      "INSERT INTO users (id, username, email) VALUES (?, ?, ?)"
+    ).run(id, username, `${username}@example.com`);
+    
+    return c.json({ message: 'User created', id });
+  } catch (error) {
+    console.error('Database error:', error);
+    return c.json({ error: 'Failed to create user' }, 500);
+  }
 });

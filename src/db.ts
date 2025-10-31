@@ -1,21 +1,41 @@
-import { D1Database } from '@cloudflare/workers-types';
-
 export class DB {
-  constructor(private db: D1Database) {}
+  private db: D1Database;
+
+  constructor(db: D1Database) {
+    this.db = db;
+  }
 
   async allUsers() {
-    return await this.db.prepare("SELECT * FROM users").all();
+    try {
+      return await this.db.prepare(
+        "SELECT * FROM users"
+      ).all();
+    } catch (error) {
+      console.error('Error fetching users:', error);
+      throw error;
+    }
   }
 
   async createUser(username: string) {
-    return await this.db.prepare("INSERT INTO users (username) VALUES (?)").bind(username).run();
+    try {
+      const id = crypto.randomUUID();
+      return await this.db.prepare(
+        "INSERT INTO users (id, username, email) VALUES (?, ?, ?)"
+      ).run(id, username, `${username}@example.com`);
+    } catch (error) {
+      console.error('Error creating user:', error);
+      throw error;
+    }
   }
 
-  async allRooms() {
-    return await this.db.prepare("SELECT * FROM rooms").all();
-  }
-
-  async createRoom(name: string, createdBy: number) {
-    return await this.db.prepare("INSERT INTO rooms (name, created_by) VALUES (?, ?)").bind(name, createdBy).run();
+  async getUserById(id: string) {
+    try {
+      return await this.db.prepare(
+        "SELECT * FROM users WHERE id = ?"
+      ).bind(id).first();
+    } catch (error) {
+      console.error('Error fetching user by id:', error);
+      throw error;
+    }
   }
 }
