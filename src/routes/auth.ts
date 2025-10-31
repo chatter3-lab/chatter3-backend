@@ -19,9 +19,8 @@ auth.post('/google', async (c) => {
       return c.json({ error: 'Invalid token format' }, 400);
     }
 
-    const payload = JSON.parse(
-      Buffer.from(tokenParts[1], 'base64').toString()
-    );
+    const payloadJson = atob(tokenParts[1].replace(/-/g, '+').replace(/_/g, '/'));
+	const payload = JSON.parse(payloadJson);
 
     const { sub: googleId, email, name, picture } = payload;
 
