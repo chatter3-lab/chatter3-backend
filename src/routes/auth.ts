@@ -1,9 +1,9 @@
 import { Hono } from 'hono';
-import { jwtVerify } from 'hono/jwt';
+import { hash, compare } from 'bcryptjs';
 
 export const auth = new Hono<{ Bindings: { DB: D1Database; GOOGLE_CLIENT_ID: string } }>();
 
-// Google OAuth verification - SIMPLIFIED FOR TESTING
+// Google OAuth verification
 auth.post('/google', async (c) => {
   try {
     const { credential, email, name } = await c.req.json();
@@ -80,13 +80,17 @@ auth.post('/google', async (c) => {
   }
 });
 
-// Email registration
+// Email registration with password
 auth.post('/register', async (c) => {
   try {
-    const { email, username, english_level = 'beginner' } = await c.req.json();
+    const { email, username, password, english_level = 'beginner' } = await c.req.json();
 
-    if (!email || !username) {
-      return c.json({ error: 'Email and username are required' }, 400);
+    if (!email || !username || !password) {
+      return c.json({ error: 'Email, username, and password are required' }, 400);
+    }
+
+    if (password.length < 6) {
+      return c.json({ error: 'Password must be at least 6 characters' }, 400);
     }
 
     // Check if email already exists
@@ -98,11 +102,14 @@ auth.post('/register', async (c) => {
       return c.json({ error: 'Email already registered' }, 400);
     }
 
+    // Hash password
+    const passwordHash = await hash(password, 10);
+
     const id = crypto.randomUUID();
 
     await c.env.DB.prepare(
-      'INSERT INTO users (id, email, username, english_level, points) VALUES (?, ?, ?, ?, ?)'
-    ).bind(id, email, username, english_level, 0).run();
+      'INSERT INTO users (id, email, username, password_hash, english_level, points) VALUES (?, ?, ?, ?, ?, ?)'
+    ).bind(id, email, username, passwordHash, english_level, 0).run();
 
     // Get the created user
     const user = await c.env.DB.prepare(
@@ -125,11 +132,61 @@ auth.post('/register', async (c) => {
   }
 });
 
+// Email login with password
+auth.post('/login', async (c) => {
+  try {
+    const { email, password } = await c.req.json();
+
+    if (!email || !password) {
+      return c.json({ error: 'Email and password are required' }, 400);
+    }
+
+    // Get user with password hash
+    const user = await c.env.DB.prepare(
+      'SELECT * FROM users WHERE email = ?'
+    ).bind(email).first();
+
+    if (!user) {
+      return c.json({ error: 'Invalid email or password' }, 401);
+    }
+
+    // Check if user has a password (Google OAuth users might not have one)
+    if (!user.password_hash) {
+      return c.json({ error: 'Please use Google Sign-In for this account' }, 401);
+    }
+
+    // Verify password
+    const isValidPassword = await compare(password, user.password_hash);
+    
+    if (!isValidPassword) {
+      return c.json({ error: 'Invalid email or password' }, 401);
+    }
+
+    // Update last_active
+    await c.env.DB.prepare(
+      'UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?'
+    ).bind(user.id).run();
+
+    return c.json({ 
+      success: true,
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        english_level: user.english_level,
+        points: user.points
+      }
+    });
+
+  } catch (error: any) {
+    console.error('Login error:', error);
+    return c.json({ error: 'Login failed', details: error.message }, 500);
+  }
+});
+
 // Get user profile
 auth.get('/me', async (c) => {
   try {
-    // This would normally use session/token authentication
-    // For now, we'll require user ID in query params for testing
     const userId = c.req.query('user_id');
     
     if (!userId) {
@@ -148,54 +205,6 @@ auth.get('/me', async (c) => {
   } catch (error: any) {
     console.error('Get user error:', error);
     return c.json({ error: 'Failed to get user' }, 500);
-  }
-});
-
-// Update user profile
-auth.put('/profile', async (c) => {
-  try {
-    const { user_id, english_level, username } = await c.req.json();
-
-    if (!user_id) {
-      return c.json({ error: 'User ID required' }, 400);
-    }
-
-    const updates: string[] = [];
-    const values: any[] = [];
-
-    if (english_level) {
-      updates.push('english_level = ?');
-      values.push(english_level);
-    }
-
-    if (username) {
-      updates.push('username = ?');
-      values.push(username);
-    }
-
-    if (updates.length === 0) {
-      return c.json({ error: 'No fields to update' }, 400);
-    }
-
-    values.push(user_id);
-
-    await c.env.DB.prepare(
-      `UPDATE users SET ${updates.join(', ')}, last_active = CURRENT_TIMESTAMP WHERE id = ?`
-    ).bind(...values).run();
-
-    // Get updated user
-    const user = await c.env.DB.prepare(
-      'SELECT id, username, email, english_level, points FROM users WHERE id = ?'
-    ).bind(user_id).first();
-
-    return c.json({ 
-      success: true,
-      user
-    });
-
-  } catch (error: any) {
-    console.error('Update profile error:', error);
-    return c.json({ error: 'Failed to update profile' }, 500);
   }
 });
 
