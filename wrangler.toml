@@ -12,3 +12,6 @@ routes = [
 binding = "DB"
 database_name = "chatter3-db"
 database_id = "5db2dd9f-f9a4-4886-86f2-2cfc71ef4cc1"
+
+[vars]
+GOOGLE_CLIENT_ID = "935611169333-7rdmfeic279un9jdl03vior15463aaba.apps.googleusercontent.com"
