@@ -6,6 +6,7 @@ import { messages } from './routes/messages';
 import { auth } from './routes/auth';
 import { matching } from './routes/matching';
 import { webrtc } from './routes/webrtc';
+import { daily } from './routes/daily';
 
 const app = new Hono<{ Bindings: { DB: D1Database; GOOGLE_CLIENT_ID: string } }>();
 
@@ -26,6 +27,7 @@ app.route('/api/messages', messages);
 app.route('/api/auth', auth);
 app.route('/api/matching', matching);
 app.route('/api/webrtc', webrtc);
+app.route('/api/daily', daily);
 
 // Health check
 app.get('/', (c) => c.text('Chatter3 Backend ✅'));
