@@ -113,4 +113,20 @@ webrtc.post('/signal/:sessionId/:userId', async (c) => {
   return c.json({ error: 'Partner not connected' }, 400);
 });
 
+webrtc.get('/test', (c) => {
+  const upgradeHeader = c.req.header('Upgrade');
+  
+  if (upgradeHeader === 'websocket') {
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    
+    server.accept();
+    server.send(JSON.stringify({ message: 'WebSocket test successful!' }));
+    
+    return new Response(null, { status: 101, webSocket: client });
+  }
+  
+  return c.json({ message: 'Send with Upgrade: websocket header to test WebSocket' });
+});
+
 export default webrtc;
