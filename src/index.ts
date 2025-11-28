@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker Backend for Chatter3
- * Features: Auth, Matching Queue, and Native WebRTC Signaling
+ * Features: Auth, Matching Queue, Native WebRTC Signaling, Points System
  */
 
 interface Env {
@@ -19,7 +19,6 @@ const corsHeaders = {
 const uuid = () => crypto.randomUUID();
 
 // --- 1. SIGNALING SERVER (Durable Object) ---
-// This acts as the "Meeting Room" that relays messages between two browsers
 export class SignalingServer implements DurableObject {
   state: DurableObjectState;
   sessions: Set<WebSocket>;
@@ -45,7 +44,6 @@ export class SignalingServer implements DurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: string) {
-    // Relay the message to the OTHER person in the room
     for (const otherWs of this.sessions) {
       if (otherWs !== ws) {
         try {
@@ -67,14 +65,13 @@ export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
 
-    // CORS Preflight
     if (request.method === 'OPTIONS') {
       return new Response(null, { headers: corsHeaders });
     }
 
     // --- AUTH ROUTES ---
 
-    // Login (Mock/Email)
+    // Login
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       const { email } = await request.json() as any;
       const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
@@ -85,7 +82,7 @@ export default {
       return Response.json({ success: true, user }, { headers: corsHeaders });
     }
 
-    // Register (Email)
+    // Register
     if (url.pathname === '/api/auth/register' && request.method === 'POST') {
       const { email, username, english_level } = await request.json() as any;
       const newId = uuid();
@@ -102,35 +99,37 @@ export default {
       }
     }
 
-    // Google Auth (Upsert: Login if exists, Register if not)
+    // Google Auth
     if (url.pathname === '/api/auth/google' && request.method === 'POST') {
       const { credential } = await request.json() as any;
-      
       try {
-        // Decode JWT (In prod, verify signature with Google's keys)
         const parts = credential.split('.');
         const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
         const email = payload.email;
         const name = payload.name || email.split('@')[0];
 
-        // 1. Check if user exists
         let user: any = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
 
         if (!user) {
-          // 2. Create user if not exists
           const newId = uuid();
           await env.DB.prepare(`
             INSERT INTO users (id, username, email, password_hash, english_level, points, created_at)
             VALUES (?, ?, ?, 'google_oauth_user', 'beginner', 100, datetime('now'))
           `).bind(newId, name, email).run();
-          
           user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
         }
 
         return Response.json({ success: true, user }, { headers: corsHeaders });
       } catch (e) {
-        return Response.json({ success: false, error: 'Invalid Google Token' }, { headers: corsHeaders });
+        return Response.json({ success: false, error: 'Invalid Token' }, { headers: corsHeaders });
       }
+    }
+
+    // User Profile Sync (For refreshing points)
+    if (url.pathname.startsWith('/api/user/') && request.method === 'GET') {
+      const userId = url.pathname.split('/').pop();
+      const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first();
+      return Response.json({ success: true, user }, { headers: corsHeaders });
     }
 
     // --- MATCHING ROUTES ---
@@ -139,7 +138,6 @@ export default {
     if (url.pathname === '/api/matching/join' && request.method === 'POST') {
       const { user_id, english_level } = await request.json() as any;
 
-      // Find a waiting partner
       const match = await env.DB.prepare(`
         SELECT * FROM matching_queue 
         WHERE english_level = ? AND user_id != ? 
@@ -147,7 +145,6 @@ export default {
       `).bind(english_level, user_id).first();
 
       if (match) {
-        // Match found! Create session.
         const sessionId = uuid();
         const partnerId = match.user_id as string;
         
@@ -156,12 +153,10 @@ export default {
           VALUES (?, ?, ?, ?, 'active', datetime('now'))
         `).bind(sessionId, user_id, partnerId, english_level).run();
 
-        // Remove partner from queue
         await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(partnerId).run();
 
         return Response.json({ success: true, matched: true, session_id: sessionId }, { headers: corsHeaders });
       } else {
-        // No match, add to queue (ensure unique)
         await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(user_id).run();
         await env.DB.prepare(`
           INSERT INTO matching_queue (user_id, english_level, joined_at)
@@ -172,7 +167,7 @@ export default {
       }
     }
 
-    // Check Session Status (Polling)
+    // Poll Session
     if (url.pathname.startsWith('/api/matching/session/')) {
       const userId = url.pathname.split('/').pop();
       
@@ -195,15 +190,40 @@ export default {
       return Response.json({ active_session: false }, { headers: corsHeaders });
     }
 
-    // End Session
+    // End Session & Award Points
     if (url.pathname === '/api/matching/end' && request.method === 'POST') {
-      const { session_id } = await request.json() as any;
-      await env.DB.prepare("UPDATE sessions SET status = 'completed', ended_at = datetime('now') WHERE id = ?").bind(session_id).run();
-      return Response.json({ success: true }, { headers: corsHeaders });
+      const { session_id, user_id } = await request.json() as any;
+      
+      // 1. Get session to verify it is still active and find both users
+      const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
+      
+      if (session && session.status === 'active') {
+        const POINTS_REWARD = 10; // 10 points per call
+        const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+
+        // 2. Mark completed
+        await env.DB.prepare("UPDATE sessions SET status = 'completed', ended_at = datetime('now') WHERE id = ?")
+          .bind(session_id).run();
+
+        // 3. Award points to User 1
+        await env.DB.batch([
+          env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user1_id),
+          env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user1_id, POINTS_REWARD, session_id, now)
+        ]);
+
+        // 4. Award points to User 2
+        await env.DB.batch([
+          env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user2_id),
+          env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user2_id, POINTS_REWARD, session_id, now)
+        ]);
+        
+        return Response.json({ success: true, points_awarded: POINTS_REWARD }, { headers: corsHeaders });
+      }
+      
+      return Response.json({ success: true, message: "Session already ended" }, { headers: corsHeaders });
     }
 
-    // --- SIGNALING ROUTE (WEBSOCKET) ---
-    // This connects the frontend to the specific Durable Object for the session
+    // --- SIGNALING ---
     if (url.pathname === '/api/signal') {
       const sessionId = url.searchParams.get('sessionId');
       if (!sessionId) return new Response('Missing sessionId', { status: 400 });
