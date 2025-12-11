@@ -44,6 +44,7 @@ export class SignalingServer implements DurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: string) {
+    // Relay message to other peers
     for (const otherWs of this.sessions) {
       if (otherWs !== ws) {
         try {
@@ -57,6 +58,8 @@ export class SignalingServer implements DurableObject {
 
   async webSocketClose(ws: WebSocket) {
     this.sessions.delete(ws);
+    // Note: We do NOT auto-broadcast 'bye' here to allow for page transitions (e.g. Lobby -> Video)
+    // The frontend handles explicit 'bye' messages when ending the call.
   }
 }
 
@@ -132,13 +135,13 @@ export default {
     if (url.pathname === '/api/matching/join' && request.method === 'POST') {
       const { user_id, english_level } = await request.json() as any;
 
-      // 1. CLEANUP: Delete users who haven't heartbeated in 2 minutes
-      // This solves the "Ghost User" issue where people match with offline users.
+      // 1. CLEANUP: Delete users who haven't heartbeated in 12 seconds
+      // Frontend beats every 3s. This ensures strict liveness.
       try {
-        await env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now', '-2 minutes')").run();
-      } catch (e) { /* ignore cleanup errors */ }
+        await env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now', '-12 seconds')").run();
+      } catch (e) { /* ignore */ }
 
-      // 2. FIND MATCH: Look for anyone else in the queue
+      // 2. FIND MATCH
       const match = await env.DB.prepare(`
         SELECT * FROM matching_queue 
         WHERE english_level = ? AND user_id != ? 
@@ -154,14 +157,12 @@ export default {
           VALUES (?, ?, ?, ?, 'active', datetime('now'))
         `).bind(sessionId, user_id, partnerId, english_level).run();
 
-        // Remove both from queue
         await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(partnerId).run();
         await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(user_id).run();
 
         return Response.json({ success: true, matched: true, session_id: sessionId }, { headers: corsHeaders });
       } else {
-        // 3. NO MATCH: Add/Update self in queue (Heartbeat)
-        // INSERT OR REPLACE updates the timestamp if user is already there
+        // 3. NO MATCH: Heartbeat
         await env.DB.prepare(`
           INSERT OR REPLACE INTO matching_queue (user_id, english_level, joined_at)
           VALUES (?, ?, datetime('now'))
