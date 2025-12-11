@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker Backend for Chatter3
- * Features: Auth, Matching Queue (with Heartbeat), Native WebRTC Signaling, Points System
+ * Features: Auth, Matching Queue (Auto-Cleaning), Native WebRTC Signaling, Points System
  */
 
 interface Env {
@@ -70,7 +70,6 @@ export default {
     }
 
     // --- AUTH ROUTES ---
-
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       const { email } = await request.json() as any;
       const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
@@ -130,15 +129,19 @@ export default {
 
     // --- MATCHING ROUTES ---
 
-    // Join Queue (Heartbeat logic: Refresh entry or match with active users)
     if (url.pathname === '/api/matching/join' && request.method === 'POST') {
       const { user_id, english_level } = await request.json() as any;
 
-      // 1. Find a waiting partner who has "heartbeated" recently (last 60s)
+      // 1. CLEANUP: Delete users who haven't heartbeated in 2 minutes
+      // This solves the "Ghost User" issue where people match with offline users.
+      try {
+        await env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now', '-2 minutes')").run();
+      } catch (e) { /* ignore cleanup errors */ }
+
+      // 2. FIND MATCH: Look for anyone else in the queue
       const match = await env.DB.prepare(`
         SELECT * FROM matching_queue 
         WHERE english_level = ? AND user_id != ? 
-        AND joined_at > datetime('now', '-60 seconds')
         ORDER BY joined_at ASC LIMIT 1
       `).bind(english_level, user_id).first();
 
@@ -151,15 +154,16 @@ export default {
           VALUES (?, ?, ?, ?, 'active', datetime('now'))
         `).bind(sessionId, user_id, partnerId, english_level).run();
 
+        // Remove both from queue
         await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(partnerId).run();
+        await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(user_id).run();
 
         return Response.json({ success: true, matched: true, session_id: sessionId }, { headers: corsHeaders });
       } else {
-        // 2. No match? Refresh my presence in the queue (Heartbeat)
-        // We delete old entries for this user to update the 'joined_at' timestamp on insert
-        await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(user_id).run();
+        // 3. NO MATCH: Add/Update self in queue (Heartbeat)
+        // INSERT OR REPLACE updates the timestamp if user is already there
         await env.DB.prepare(`
-          INSERT INTO matching_queue (user_id, english_level, joined_at)
+          INSERT OR REPLACE INTO matching_queue (user_id, english_level, joined_at)
           VALUES (?, ?, datetime('now'))
         `).bind(user_id, english_level).run();
 
@@ -167,7 +171,6 @@ export default {
       }
     }
 
-    // Leave Queue (Cleanup)
     if (url.pathname === '/api/matching/leave' && request.method === 'POST') {
       const { user_id } = await request.json() as any;
       await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(user_id).run();
@@ -212,6 +215,7 @@ export default {
       return Response.json({ success: true, message: "Session already ended" }, { headers: corsHeaders });
     }
 
+    // --- SIGNALING ---
     if (url.pathname === '/api/signal') {
       const sessionId = url.searchParams.get('sessionId');
       if (!sessionId) return new Response('Missing sessionId', { status: 400 });
