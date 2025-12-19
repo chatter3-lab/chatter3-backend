@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker Backend for Chatter3
- * Features: Auth, Matching Queue (Auto-Cleaning), Native WebRTC Signaling, Points System
+ * Features: Auth, Matching, WebRTC Signaling, Points, and ICE/TURN Config
  */
 
 interface Env {
@@ -8,17 +8,14 @@ interface Env {
   SIGNALING: DurableObjectNamespace;
 }
 
-// Standard CORS Headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
-// Helper: UUID Generator
 const uuid = () => crypto.randomUUID();
 
-// --- 1. SIGNALING SERVER (Durable Object) ---
 export class SignalingServer implements DurableObject {
   state: DurableObjectState;
   sessions: Set<WebSocket>;
@@ -44,7 +41,6 @@ export class SignalingServer implements DurableObject {
   }
 
   async webSocketMessage(ws: WebSocket, message: string) {
-    // Relay message to other peers
     for (const otherWs of this.sessions) {
       if (otherWs !== ws) {
         try {
@@ -58,12 +54,9 @@ export class SignalingServer implements DurableObject {
 
   async webSocketClose(ws: WebSocket) {
     this.sessions.delete(ws);
-    // Note: We do NOT auto-broadcast 'bye' here to allow for page transitions (e.g. Lobby -> Video)
-    // The frontend handles explicit 'bye' messages when ending the call.
   }
 }
 
-// --- 2. MAIN WORKER API ---
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -72,14 +65,32 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // --- AUTH ROUTES ---
+    // --- NEW: ICE SERVERS ENDPOINT ---
+    // This is where you fix the WiFi issue. Add TURN servers here.
+    if (url.pathname === '/api/ice-servers') {
+      // START: Replace or append with real TURN credentials (e.g. from Metered.ca)
+      //API Key for the credential: 075477e7cb4cd90b70eb8fa70dbb4b7ab76a
+
+      // Calling the REST API TO fetch the TURN Server Credentials
+    const response = 
+    await fetch("https://chatter3.metered.live/api/v1/turn/credentials?apiKey=075477e7cb4cd90b70eb8fa70dbb4b7ab76a");
+
+      // Saving the response in the iceServers array
+    const iceServers = await response.json();
+
+      // Using the iceServers array in the RTCPeerConnection method
+    var myPeerConnection = new RTCPeerConnection({
+        iceServers: iceServers
+    });
+      // END
+      return Response.json({ iceServers }, { headers: corsHeaders });
+    }
+
+    // --- AUTH ---
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       const { email } = await request.json() as any;
       const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
-      
-      if (!user) {
-        return Response.json({ success: false, error: 'User not found' }, { headers: corsHeaders });
-      }
+      if (!user) return Response.json({ success: false, error: 'User not found' }, { headers: corsHeaders });
       return Response.json({ success: true, user }, { headers: corsHeaders });
     }
 
@@ -91,7 +102,6 @@ export default {
           INSERT INTO users (id, username, email, password_hash, english_level, points, created_at)
           VALUES (?, ?, ?, 'google_oauth_user', ?, 100, datetime('now'))
         `).bind(newId, username, email, english_level || 'beginner').run();
-        
         const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
         return Response.json({ success: true, user }, { headers: corsHeaders });
       } catch (e) {
@@ -108,7 +118,6 @@ export default {
         const name = payload.name || email.split('@')[0];
 
         let user: any = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
-
         if (!user) {
           const newId = uuid();
           await env.DB.prepare(`
@@ -117,7 +126,6 @@ export default {
           `).bind(newId, name, email).run();
           user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
         }
-
         return Response.json({ success: true, user }, { headers: corsHeaders });
       } catch (e) {
         return Response.json({ success: false, error: 'Invalid Token' }, { headers: corsHeaders });
@@ -130,44 +138,32 @@ export default {
       return Response.json({ success: true, user }, { headers: corsHeaders });
     }
 
-    // --- MATCHING ROUTES ---
-
+    // --- MATCHING ---
     if (url.pathname === '/api/matching/join' && request.method === 'POST') {
       const { user_id, english_level } = await request.json() as any;
 
-      // 1. CLEANUP: Delete users who haven't heartbeated in 12 seconds
-      // Frontend beats every 3s. This ensures strict liveness.
       try {
         await env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now', '-12 seconds')").run();
-      } catch (e) { /* ignore */ }
+      } catch (e) { }
 
-      // 2. FIND MATCH
       const match = await env.DB.prepare(`
-        SELECT * FROM matching_queue 
-        WHERE english_level = ? AND user_id != ? 
-        ORDER BY joined_at ASC LIMIT 1
+        SELECT * FROM matching_queue WHERE english_level = ? AND user_id != ? ORDER BY joined_at ASC LIMIT 1
       `).bind(english_level, user_id).first();
 
       if (match) {
         const sessionId = uuid();
         const partnerId = match.user_id as string;
-        
         await env.DB.prepare(`
           INSERT INTO sessions (id, user1_id, user2_id, english_level, status, created_at)
           VALUES (?, ?, ?, ?, 'active', datetime('now'))
         `).bind(sessionId, user_id, partnerId, english_level).run();
-
         await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(partnerId).run();
         await env.DB.prepare('DELETE FROM matching_queue WHERE user_id = ?').bind(user_id).run();
-
         return Response.json({ success: true, matched: true, session_id: sessionId }, { headers: corsHeaders });
       } else {
-        // 3. NO MATCH: Heartbeat
         await env.DB.prepare(`
-          INSERT OR REPLACE INTO matching_queue (user_id, english_level, joined_at)
-          VALUES (?, ?, datetime('now'))
+          INSERT OR REPLACE INTO matching_queue (user_id, english_level, joined_at) VALUES (?, ?, datetime('now'))
         `).bind(user_id, english_level).run();
-
         return Response.json({ success: true, matched: false }, { headers: corsHeaders });
       }
     }
@@ -181,11 +177,8 @@ export default {
     if (url.pathname.startsWith('/api/matching/session/')) {
       const userId = url.pathname.split('/').pop();
       const session: any = await env.DB.prepare(`
-        SELECT * FROM sessions 
-        WHERE (user1_id = ? OR user2_id = ?) AND status = 'active'
-        LIMIT 1
+        SELECT * FROM sessions WHERE (user1_id = ? OR user2_id = ?) AND status = 'active' LIMIT 1
       `).bind(userId, userId).first();
-
       if (session) {
         const partnerId = session.user1_id === userId ? session.user2_id : session.user1_id;
         const partner = await env.DB.prepare('SELECT id, username, english_level FROM users WHERE id = ?').bind(partnerId).first();
@@ -199,24 +192,20 @@ export default {
       const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
       
       if (session && session.status === 'active') {
-        const POINTS_REWARD = 10;
+        const POINTS = 10;
         const now = new Date().toISOString().replace('T', ' ').split('.')[0];
-
         await env.DB.prepare("UPDATE sessions SET status = 'completed', ended_at = datetime('now') WHERE id = ?").bind(session_id).run();
-
         await env.DB.batch([
-          env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user1_id),
-          env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user1_id, POINTS_REWARD, session_id, now),
-          env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user2_id),
-          env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user2_id, POINTS_REWARD, session_id, now)
+          env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS, session.user1_id),
+          env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user1_id, POINTS, session_id, now),
+          env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS, session.user2_id),
+          env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user2_id, POINTS, session_id, now)
         ]);
-        
-        return Response.json({ success: true, points_awarded: POINTS_REWARD }, { headers: corsHeaders });
+        return Response.json({ success: true, points_awarded: POINTS }, { headers: corsHeaders });
       }
       return Response.json({ success: true, message: "Session already ended" }, { headers: corsHeaders });
     }
 
-    // --- SIGNALING ---
     if (url.pathname === '/api/signal') {
       const sessionId = url.searchParams.get('sessionId');
       if (!sessionId) return new Response('Missing sessionId', { status: 400 });
