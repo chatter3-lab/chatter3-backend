@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker Backend for Chatter3
- * Features: Auth, Matching, WebRTC, Points, Profile & History
+ * Features: Auth, Matching Queue (Auto-Cleaning), Native WebRTC Signaling, Points System
  */
 
 interface Env {
@@ -8,15 +8,17 @@ interface Env {
   SIGNALING: DurableObjectNamespace;
 }
 
+// Standard CORS Headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
+// Helper: UUID Generator
 const uuid = () => crypto.randomUUID();
 
-// --- 1. SIGNALING SERVER ---
+// --- 1. SIGNALING SERVER (Durable Object) ---
 export class SignalingServer implements DurableObject {
   state: DurableObjectState;
   sessions: Set<WebSocket>;
@@ -28,18 +30,27 @@ export class SignalingServer implements DurableObject {
 
   async fetch(request: Request) {
     const upgradeHeader = request.headers.get('Upgrade');
-    if (!upgradeHeader || upgradeHeader !== 'websocket') return new Response('Expected Upgrade: websocket', { status: 426 });
+    if (!upgradeHeader || upgradeHeader !== 'websocket') {
+      return new Response('Expected Upgrade: websocket', { status: 426 });
+    }
+
     const webSocketPair = new WebSocketPair();
     const [client, server] = Object.values(webSocketPair);
+
     this.state.acceptWebSocket(server);
     this.sessions.add(server);
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string) {
     for (const otherWs of this.sessions) {
       if (otherWs !== ws) {
-        try { otherWs.send(message); } catch (e) { this.sessions.delete(otherWs); }
+        try {
+          otherWs.send(message);
+        } catch (e) {
+          this.sessions.delete(otherWs);
+        }
       }
     }
   }
@@ -58,23 +69,29 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // --- ICE SERVERS ---
+    // --- ICE SERVERS ENDPOINT ---
     if (url.pathname === '/api/ice-servers') {
       try {
         const response = await fetch("https://chatter3.metered.live/api/v1/turn/credentials?apiKey=075477e7cb4cd90b70eb8fa70dbb4b7ab76a");
         const iceServers = await response.json();
         return Response.json({ iceServers }, { headers: corsHeaders });
       } catch (error) {
-        const iceServers = [{ urls: 'stun:stun.l.google.com:19302' }];
+        const iceServers = [
+          { urls: 'stun:stun.l.google.com:19302' },
+          { urls: 'stun:stun1.l.google.com:19302' }
+        ];
         return Response.json({ iceServers }, { headers: corsHeaders });
       }
     }
 
-    // --- AUTH ---
+    // --- AUTH ROUTES ---
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       const { email } = await request.json() as any;
       const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
-      if (!user) return Response.json({ success: false, error: 'User not found' }, { headers: corsHeaders });
+      
+      if (!user) {
+        return Response.json({ success: false, error: 'User not found' }, { headers: corsHeaders });
+      }
       return Response.json({ success: true, user }, { headers: corsHeaders });
     }
 
@@ -83,9 +100,10 @@ export default {
       const newId = uuid();
       try {
         await env.DB.prepare(`
-          INSERT INTO users (id, username, email, password_hash, english_level, points, created_at, nickname)
-          VALUES (?, ?, ?, 'google_oauth_user', ?, 100, datetime('now'), ?)
-        `).bind(newId, username, email, english_level || 'beginner', username).run();
+          INSERT INTO users (id, username, email, password_hash, english_level, points, created_at)
+          VALUES (?, ?, ?, 'google_oauth_user', ?, 100, datetime('now'))
+        `).bind(newId, username, email, english_level || 'beginner').run();
+        
         const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
         return Response.json({ success: true, user }, { headers: corsHeaders });
       } catch (e) {
@@ -103,6 +121,7 @@ export default {
         const picture = payload.picture;
 
         let user: any = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
+
         if (!user) {
           const newId = uuid();
           await env.DB.prepare(`
@@ -111,20 +130,22 @@ export default {
           `).bind(newId, name, email, picture, name).run();
           user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
         }
+
         return Response.json({ success: true, user }, { headers: corsHeaders });
       } catch (e) {
         return Response.json({ success: false, error: 'Invalid Token' }, { headers: corsHeaders });
       }
     }
 
-    // --- USER PROFILE & HISTORY ---
+    // --- USER PROFILE ROUTES ---
     if (url.pathname === '/api/user/update' && request.method === 'POST') {
-      const { id, nickname, country, native_language, english_level, bio } = await request.json() as any;
+      // ADDED avatar_url here
+      const { id, nickname, country, native_language, english_level, bio, avatar_url } = await request.json() as any;
       await env.DB.prepare(`
         UPDATE users 
-        SET nickname = ?, country = ?, native_language = ?, english_level = ?, bio = ? 
+        SET nickname = ?, country = ?, native_language = ?, english_level = ?, bio = ?, avatar_url = ?
         WHERE id = ?
-      `).bind(nickname, country, native_language, english_level, bio, id).run();
+      `).bind(nickname, country, native_language, english_level, bio, avatar_url, id).run();
       
       const updatedUser = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
       return Response.json({ success: true, user: updatedUser }, { headers: corsHeaders });
@@ -132,31 +153,17 @@ export default {
 
     if (url.pathname === '/api/user/history' && request.method === 'POST') {
       const { user_id } = await request.json() as any;
-      
-      // Fetch completed sessions where user was a participant
       const history = await env.DB.prepare(`
         SELECT 
-          s.id, 
-          s.created_at, 
-          s.ended_at, 
-          s.duration,
-          CASE 
-            WHEN s.user1_id = ? THEN u2.username 
-            ELSE u1.username 
-          END as partner_name,
-          CASE 
-            WHEN s.user1_id = ? THEN u2.avatar_url 
-            ELSE u1.avatar_url 
-          END as partner_avatar
+          s.id, s.created_at, s.ended_at, s.duration,
+          CASE WHEN s.user1_id = ? THEN u2.username ELSE u1.username END as partner_name,
+          CASE WHEN s.user1_id = ? THEN u2.avatar_url ELSE u1.avatar_url END as partner_avatar
         FROM sessions s
         JOIN users u1 ON s.user1_id = u1.id
         JOIN users u2 ON s.user2_id = u2.id
-        WHERE (s.user1_id = ? OR s.user2_id = ?) 
-          AND s.status = 'completed'
-        ORDER BY s.created_at DESC
-        LIMIT 20
+        WHERE (s.user1_id = ? OR s.user2_id = ?) AND s.status = 'completed'
+        ORDER BY s.created_at DESC LIMIT 20
       `).bind(user_id, user_id, user_id, user_id).all();
-      
       return Response.json({ success: true, history: history.results }, { headers: corsHeaders });
     }
 
@@ -166,14 +173,12 @@ export default {
       return Response.json({ success: true, user }, { headers: corsHeaders });
     }
 
-    // --- MATCHING ---
+    // --- MATCHING ROUTES ---
     if (url.pathname === '/api/matching/join' && request.method === 'POST') {
       const { user_id, english_level } = await request.json() as any;
       try { await env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now', '-12 seconds')").run(); } catch (e) { }
 
-      const match = await env.DB.prepare(`
-        SELECT * FROM matching_queue WHERE english_level = ? AND user_id != ? ORDER BY joined_at ASC LIMIT 1
-      `).bind(english_level, user_id).first();
+      const match = await env.DB.prepare(`SELECT * FROM matching_queue WHERE english_level = ? AND user_id != ? ORDER BY joined_at ASC LIMIT 1`).bind(english_level, user_id).first();
 
       if (match) {
         const sessionId = uuid();
@@ -211,13 +216,25 @@ export default {
       
       if (session && session.status === 'active') {
         const now = new Date().toISOString().replace('T', ' ').split('.')[0];
-        const status = reason === 'hangup' || reason === 'cancelled' ? 'completed' : 'completed';
+        const status = 'completed'; // Always complete if reason is hangup or cancelled to stop polling
         await env.DB.prepare("UPDATE sessions SET status = ?, ended_at = datetime('now') WHERE id = ?").bind(status, session_id).run();
-        return Response.json({ success: true, message: "Session ended" }, { headers: corsHeaders });
+        
+        if (reason === 'call_completed') {
+           const POINTS_REWARD = 10;
+           await env.DB.batch([
+             env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user1_id),
+             env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user1_id, POINTS_REWARD, session_id, now),
+             env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user2_id),
+             env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user2_id, POINTS_REWARD, session_id, now)
+           ]);
+           return Response.json({ success: true, points_awarded: POINTS_REWARD }, { headers: corsHeaders });
+        }
+        return Response.json({ success: true, points_awarded: 0, message: "Session ended" }, { headers: corsHeaders });
       }
       return Response.json({ success: true, message: "Session already ended" }, { headers: corsHeaders });
     }
 
+    // Rate Partner
     if (url.pathname === '/api/matching/rate' && request.method === 'POST') {
       const { session_id, user_id, rating } = await request.json() as any;
       const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
