@@ -1,6 +1,6 @@
 /**
  * Cloudflare Worker Backend for Chatter3
- * Features: Auth, Matching Queue (Auto-Cleaning), Native WebRTC Signaling, Points System
+ * Optimized Monolithic Version: Auth, Matching, WebRTC Signaling, Points
  */
 
 interface Env {
@@ -8,17 +8,15 @@ interface Env {
   SIGNALING: DurableObjectNamespace;
 }
 
-// Standard CORS Headers
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
 
-// Helper: UUID Generator
 const uuid = () => crypto.randomUUID();
 
-// --- 1. SIGNALING SERVER (Durable Object) ---
+// --- SIGNALING SERVER (Durable Object) ---
 export class SignalingServer implements DurableObject {
   state: DurableObjectState;
   sessions: Set<WebSocket>;
@@ -60,7 +58,7 @@ export class SignalingServer implements DurableObject {
   }
 }
 
-// --- 2. MAIN WORKER API ---
+// --- MAIN WORKER API ---
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
@@ -69,18 +67,14 @@ export default {
       return new Response(null, { headers: corsHeaders });
     }
 
-    // --- ICE SERVERS ENDPOINT ---
+    // --- TURN/STUN SERVERS ---
     if (url.pathname === '/api/ice-servers') {
       try {
         const response = await fetch("https://chatter3.metered.live/api/v1/turn/credentials?apiKey=075477e7cb4cd90b70eb8fa70dbb4b7ab76a");
         const iceServers = await response.json();
         return Response.json({ iceServers }, { headers: corsHeaders });
       } catch (error) {
-        const iceServers = [
-          { urls: 'stun:stun.l.google.com:19302' },
-          { urls: 'stun:stun1.l.google.com:19302' }
-        ];
-        return Response.json({ iceServers }, { headers: corsHeaders });
+        return Response.json({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] }, { headers: corsHeaders });
       }
     }
 
@@ -88,21 +82,18 @@ export default {
     if (url.pathname === '/api/auth/login' && request.method === 'POST') {
       const { email } = await request.json() as any;
       const user = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
-      
-      if (!user) {
-        return Response.json({ success: false, error: 'User not found' }, { headers: corsHeaders });
-      }
+      if (!user) return Response.json({ success: false, error: 'User not found' }, { headers: corsHeaders });
       return Response.json({ success: true, user }, { headers: corsHeaders });
     }
 
     if (url.pathname === '/api/auth/register' && request.method === 'POST') {
-      const { email, username, english_level } = await request.json() as any;
+      const { email, username, english_level, country, native_language } = await request.json() as any;
       const newId = uuid();
       try {
         await env.DB.prepare(`
-          INSERT INTO users (id, username, email, password_hash, english_level, points, created_at)
-          VALUES (?, ?, ?, 'google_oauth_user', ?, 100, datetime('now'))
-        `).bind(newId, username, email, english_level || 'beginner').run();
+          INSERT INTO users (id, username, email, password_hash, english_level, country, native_language, points, created_at)
+          VALUES (?, ?, ?, 'local_auth', ?, ?, ?, 100, datetime('now'))
+        `).bind(newId, username, email, english_level || 'beginner', country || '', native_language || '').run();
         
         const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
         return Response.json({ success: true, user }, { headers: corsHeaders });
@@ -111,41 +102,12 @@ export default {
       }
     }
 
-    if (url.pathname === '/api/auth/google' && request.method === 'POST') {
-      const { credential } = await request.json() as any;
-      try {
-        const parts = credential.split('.');
-        const payload = JSON.parse(atob(parts[1].replace(/-/g, '+').replace(/_/g, '/')));
-        const email = payload.email;
-        const name = payload.name || email.split('@')[0];
-        const picture = payload.picture;
-
-        let user: any = await env.DB.prepare('SELECT * FROM users WHERE email = ?').bind(email).first();
-
-        if (!user) {
-          const newId = uuid();
-          await env.DB.prepare(`
-            INSERT INTO users (id, username, email, password_hash, english_level, points, created_at, avatar_url, nickname)
-            VALUES (?, ?, ?, 'google_oauth_user', 'beginner', 100, datetime('now'), ?, ?)
-          `).bind(newId, name, email, picture, name).run();
-          user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(newId).first();
-        }
-
-        return Response.json({ success: true, user }, { headers: corsHeaders });
-      } catch (e) {
-        return Response.json({ success: false, error: 'Invalid Token' }, { headers: corsHeaders });
-      }
-    }
-
     // --- USER PROFILE ROUTES ---
     if (url.pathname === '/api/user/update' && request.method === 'POST') {
       const { id, nickname, country, native_language, english_level, bio, avatar_url } = await request.json() as any;
       await env.DB.prepare(`
-        UPDATE users 
-        SET nickname = ?, country = ?, native_language = ?, english_level = ?, bio = ?, avatar_url = ?
-        WHERE id = ?
+        UPDATE users SET nickname = ?, country = ?, native_language = ?, english_level = ?, bio = ?, avatar_url = ? WHERE id = ?
       `).bind(nickname, country, native_language, english_level, bio, avatar_url, id).run();
-      
       const updatedUser = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(id).first();
       return Response.json({ success: true, user: updatedUser }, { headers: corsHeaders });
     }
@@ -153,26 +115,16 @@ export default {
     if (url.pathname === '/api/user/history' && request.method === 'POST') {
       const { user_id } = await request.json() as any;
       const history = await env.DB.prepare(`
-        SELECT 
-          s.id, s.created_at, s.ended_at, s.duration,
+        SELECT s.id, s.created_at, s.ended_at, s.duration,
           CASE WHEN s.user1_id = ? THEN u2.username ELSE u1.username END as partner_name,
           CASE WHEN s.user1_id = ? THEN u2.avatar_url ELSE u1.avatar_url END as partner_avatar
-        FROM sessions s
-        JOIN users u1 ON s.user1_id = u1.id
-        JOIN users u2 ON s.user2_id = u2.id
-        WHERE (s.user1_id = ? OR s.user2_id = ?) AND s.status = 'completed'
-        ORDER BY s.created_at DESC LIMIT 20
+        FROM sessions s JOIN users u1 ON s.user1_id = u1.id JOIN users u2 ON s.user2_id = u2.id
+        WHERE (s.user1_id = ? OR s.user2_id = ?) AND s.status = 'completed' ORDER BY s.created_at DESC LIMIT 20
       `).bind(user_id, user_id, user_id, user_id).all();
       return Response.json({ success: true, history: history.results }, { headers: corsHeaders });
     }
 
-    if (url.pathname.startsWith('/api/user/') && request.method === 'GET') {
-      const userId = url.pathname.split('/').pop();
-      const user = await env.DB.prepare('SELECT * FROM users WHERE id = ?').bind(userId).first();
-      return Response.json({ success: true, user }, { headers: corsHeaders });
-    }
-
-    // --- MATCHING ROUTES ---
+    // --- MATCHING & SESSIONS ---
     if (url.pathname === '/api/matching/join' && request.method === 'POST') {
       const { user_id, english_level } = await request.json() as any;
       try { await env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now', '-12 seconds')").run(); } catch (e) { }
@@ -209,33 +161,19 @@ export default {
       return Response.json({ active_session: false }, { headers: corsHeaders });
     }
 
+    // --- END CALL & RATING ---
     if (url.pathname === '/api/matching/end' && request.method === 'POST') {
-      const { session_id, user_id, reason } = await request.json() as any;
+      const { session_id } = await request.json() as any;
       const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
       
       if (session && session.status === 'active') {
-        const now = new Date().toISOString().replace('T', ' ').split('.')[0];
-        
-        // Calculate duration correctly to fix the "Incomplete" bug
         const startTime = new Date(session.created_at).getTime();
         const duration = Math.floor((Date.now() - startTime) / 1000);
-
-        await env.DB.prepare(`
-          UPDATE sessions 
-          SET status = 'completed', ended_at = datetime('now'), duration = ? 
-          WHERE id = ?
-        `).bind(duration, session_id).run();
-        
-        if (reason === 'call_completed') {
-           // Provide fallback points if needed, though points logic primarily runs in /rate now
-           return Response.json({ success: true, message: "Session completed. Pending rating." }, { headers: corsHeaders });
-        }
-        return Response.json({ success: true, points_awarded: 0, message: "Session ended" }, { headers: corsHeaders });
+        await env.DB.prepare(`UPDATE sessions SET status = 'completed', ended_at = datetime('now'), duration = ? WHERE id = ?`).bind(duration, session_id).run();
       }
-      return Response.json({ success: true, message: "Session already ended" }, { headers: corsHeaders });
+      return Response.json({ success: true }, { headers: corsHeaders });
     }
 
-    // Rate Partner & Award Points
     if (url.pathname === '/api/matching/rate' && request.method === 'POST') {
       const { session_id, user_id, rating } = await request.json() as any;
       const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
@@ -243,25 +181,13 @@ export default {
 
       const isUser1 = session.user1_id === user_id;
       const updateField = isUser1 ? 'user1_rating' : 'user2_rating';
-      
-      // Calculate duration just in case /end wasn't called properly
       const startTime = new Date(session.created_at).getTime();
       const duration = Math.floor((Date.now() - startTime) / 1000);
 
-      // Save rating and ensure duration is populated
-      await env.DB.prepare(`
-        UPDATE sessions 
-        SET ${updateField} = ?, 
-            status = 'completed', 
-            duration = COALESCE(duration, ?)
-        WHERE id = ?
-      `).bind(rating, duration, session_id).run();
-      
+      await env.DB.prepare(`UPDATE sessions SET ${updateField} = ?, status = 'completed', duration = COALESCE(duration, ?) WHERE id = ?`).bind(rating, duration, session_id).run();
       const updatedSession: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
       
-      // Only award points if BOTH have rated
       if (updatedSession.user1_rating && updatedSession.user2_rating) {
-         // Good/Good = 2 pts each | Meh/Meh = 1 pt each | Mixed = 2 to Good receiver, 1 to Meh receiver
          const ptsForUser1 = updatedSession.user2_rating === 'good' ? 2 : 1;
          const ptsForUser2 = updatedSession.user1_rating === 'good' ? 2 : 1;
          const now = new Date().toISOString().replace('T', ' ').split('.')[0];
@@ -275,7 +201,7 @@ export default {
 
          return Response.json({ success: true, points_awarded: isUser1 ? ptsForUser1 : ptsForUser2 }, { headers: corsHeaders });
       }
-      return Response.json({ success: true, message: "Rating saved. Waiting for partner to rate." }, { headers: corsHeaders });
+      return Response.json({ success: true, message: "Rating saved." }, { headers: corsHeaders });
     }
 
     if (url.pathname === '/api/signal') {
