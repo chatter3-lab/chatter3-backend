@@ -139,7 +139,6 @@ export default {
 
     // --- USER PROFILE ROUTES ---
     if (url.pathname === '/api/user/update' && request.method === 'POST') {
-      // ADDED avatar_url here
       const { id, nickname, country, native_language, english_level, bio, avatar_url } = await request.json() as any;
       await env.DB.prepare(`
         UPDATE users 
@@ -216,26 +215,28 @@ export default {
       
       if (session && session.status === 'active') {
         const now = new Date().toISOString().replace('T', ' ').split('.')[0];
-        const status = 'completed'; // Always complete if reason is hangup or cancelled to stop polling
-        await env.DB.prepare("UPDATE sessions SET status = ?, ended_at = datetime('now') WHERE id = ?").bind(status, session_id).run();
+        
+        // Calculate duration correctly to fix the "Incomplete" bug
+        const startTime = new Date(session.created_at).getTime();
+        const duration = Math.floor((Date.now() - startTime) / 1000);
+
+        await env.DB.prepare(`
+          UPDATE sessions 
+          SET status = 'completed', ended_at = datetime('now'), duration = ? 
+          WHERE id = ?
+        `).bind(duration, session_id).run();
         
         if (reason === 'call_completed') {
-           const POINTS_REWARD = 10;
-           await env.DB.batch([
-             env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user1_id),
-             env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user1_id, POINTS_REWARD, session_id, now),
-             env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user2_id),
-             env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user2_id, POINTS_REWARD, session_id, now)
-           ]);
-           return Response.json({ success: true, points_awarded: POINTS_REWARD }, { headers: corsHeaders });
+           // Provide fallback points if needed, though points logic primarily runs in /rate now
+           return Response.json({ success: true, message: "Session completed. Pending rating." }, { headers: corsHeaders });
         }
         return Response.json({ success: true, points_awarded: 0, message: "Session ended" }, { headers: corsHeaders });
       }
       return Response.json({ success: true, message: "Session already ended" }, { headers: corsHeaders });
     }
 
-    // Rate Partner
-  if (url.pathname === '/api/matching/rate' && request.method === 'POST') {
+    // Rate Partner & Award Points
+    if (url.pathname === '/api/matching/rate' && request.method === 'POST') {
       const { session_id, user_id, rating } = await request.json() as any;
       const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
       if (!session) return Response.json({ success: false, error: "Session not found" }, { headers: corsHeaders });
