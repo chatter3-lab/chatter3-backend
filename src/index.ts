@@ -139,7 +139,6 @@ export default {
 
     // --- USER PROFILE ROUTES ---
     if (url.pathname === '/api/user/update' && request.method === 'POST') {
-      // ADDED avatar_url here
       const { id, nickname, country, native_language, english_level, bio, avatar_url } = await request.json() as any;
       await env.DB.prepare(`
         UPDATE users 
@@ -216,25 +215,27 @@ export default {
       
       if (session && session.status === 'active') {
         const now = new Date().toISOString().replace('T', ' ').split('.')[0];
-        const status = 'completed'; // Always complete if reason is hangup or cancelled to stop polling
-        await env.DB.prepare("UPDATE sessions SET status = ?, ended_at = datetime('now') WHERE id = ?").bind(status, session_id).run();
+        
+        // Calculate duration correctly to fix the "Incomplete" bug
+        const startTime = new Date(session.created_at).getTime();
+        const duration = Math.floor((Date.now() - startTime) / 1000);
+
+        await env.DB.prepare(`
+          UPDATE sessions 
+          SET status = 'completed', ended_at = datetime('now'), duration = ? 
+          WHERE id = ?
+        `).bind(duration, session_id).run();
         
         if (reason === 'call_completed') {
-           const POINTS_REWARD = 10;
-           await env.DB.batch([
-             env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user1_id),
-             env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user1_id, POINTS_REWARD, session_id, now),
-             env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(POINTS_REWARD, session.user2_id),
-             env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call', ?, ?)").bind(uuid(), session.user2_id, POINTS_REWARD, session_id, now)
-           ]);
-           return Response.json({ success: true, points_awarded: POINTS_REWARD }, { headers: corsHeaders });
+           // Provide fallback points if needed, though points logic primarily runs in /rate now
+           return Response.json({ success: true, message: "Session completed. Pending rating." }, { headers: corsHeaders });
         }
         return Response.json({ success: true, points_awarded: 0, message: "Session ended" }, { headers: corsHeaders });
       }
       return Response.json({ success: true, message: "Session already ended" }, { headers: corsHeaders });
     }
 
-    // Rate Partner
+    // Rate Partner & Award Points
     if (url.pathname === '/api/matching/rate' && request.method === 'POST') {
       const { session_id, user_id, rating } = await request.json() as any;
       const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
@@ -242,11 +243,25 @@ export default {
 
       const isUser1 = session.user1_id === user_id;
       const updateField = isUser1 ? 'user1_rating' : 'user2_rating';
-      await env.DB.prepare(`UPDATE sessions SET ${updateField} = ? WHERE id = ?`).bind(rating, session_id).run();
+      
+      // Calculate duration just in case /end wasn't called properly
+      const startTime = new Date(session.created_at).getTime();
+      const duration = Math.floor((Date.now() - startTime) / 1000);
+
+      // Save rating and ensure duration is populated
+      await env.DB.prepare(`
+        UPDATE sessions 
+        SET ${updateField} = ?, 
+            status = 'completed', 
+            duration = COALESCE(duration, ?)
+        WHERE id = ?
+      `).bind(rating, duration, session_id).run();
       
       const updatedSession: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
       
+      // Only award points if BOTH have rated
       if (updatedSession.user1_rating && updatedSession.user2_rating) {
+         // Good/Good = 2 pts each | Meh/Meh = 1 pt each | Mixed = 2 to Good receiver, 1 to Meh receiver
          const ptsForUser1 = updatedSession.user2_rating === 'good' ? 2 : 1;
          const ptsForUser2 = updatedSession.user1_rating === 'good' ? 2 : 1;
          const now = new Date().toISOString().replace('T', ' ').split('.')[0];
@@ -260,7 +275,7 @@ export default {
 
          return Response.json({ success: true, points_awarded: isUser1 ? ptsForUser1 : ptsForUser2 }, { headers: corsHeaders });
       }
-      return Response.json({ success: true, message: "Rating saved" }, { headers: corsHeaders });
+      return Response.json({ success: true, message: "Rating saved. Waiting for partner to rate." }, { headers: corsHeaders });
     }
 
     if (url.pathname === '/api/signal') {
