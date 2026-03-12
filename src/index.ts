@@ -235,57 +235,47 @@ export default {
     }
 
     // Rate Partner
-    if (url.pathname === '/api/rate' && request.method === 'POST') {
-  const body = await request.json();
-  const session_id = body.session_id;
-  const user_id = body.user_id;
-  const rating = body.rating;
-
-  try {
-    // 1. Save the individual user's rating
-    await env.DB.prepare(`
-      UPDATE video_sessions 
-      SET user1_rating = CASE WHEN user1_id = ? THEN ? ELSE user1_rating END,
-          user2_rating = CASE WHEN user2_id = ? THEN ? ELSE user2_rating END
-      WHERE id = ?
-    `).bind(user_id, rating, user_id, rating, session_id).run();
-
-    // 2. Fetch the session to see if BOTH users have now rated
-    const session: any = await env.DB.prepare("SELECT * FROM video_sessions WHERE id = ?").bind(session_id).first();
-
-    if (session && session.user1_rating && session.user2_rating) {
-      // Calculate actual duration
-      const startTime = new Date(session.created_at).getTime();
-      const durationSeconds = Math.floor((Date.now() - startTime) / 1000);
-
-      // Co-founder's Point Logic: Good = 2pts to receiver, Meh = 1pt to receiver
-      const ptsForUser1 = session.user2_rating === 'good' ? 2 : 1;
-      const ptsForUser2 = session.user1_rating === 'good' ? 2 : 1;
-      const now = new Date().toISOString().replace('T', ' ').split('.')[0];
-
-      // Update the session to 'completed', save duration, and award points!
-      await env.DB.batch([
-        // Finalize Session
-        env.DB.prepare("UPDATE video_sessions SET duration = ?, status = 'completed' WHERE id = ?").bind(durationSeconds, session_id),
-        // Award User 1
-        env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(ptsForUser1, session.user1_id),
-        env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call_reward', ?, ?)").bind(crypto.randomUUID(), session.user1_id, ptsForUser1, session_id, now),
-        // Award User 2
-        env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(ptsForUser2, session.user2_id),
-        env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call_reward', ?, ?)").bind(crypto.randomUUID(), session.user2_id, ptsForUser2, session_id, now)
-      ]);
+  if (url.pathname === '/api/matching/rate' && request.method === 'POST') {
+      const { session_id, user_id, rating } = await request.json() as any;
+      const session: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
+      if (!session) return Response.json({ success: false, error: "Session not found" }, { headers: corsHeaders });
 
       const isUser1 = session.user1_id === user_id;
-      return Response.json({ success: true, points_awarded: isUser1 ? ptsForUser1 : ptsForUser2, duration: durationSeconds }, { headers: corsHeaders });
+      const updateField = isUser1 ? 'user1_rating' : 'user2_rating';
+      
+      // Calculate duration just in case /end wasn't called properly
+      const startTime = new Date(session.created_at).getTime();
+      const duration = Math.floor((Date.now() - startTime) / 1000);
+
+      // Save rating and ensure duration is populated
+      await env.DB.prepare(`
+        UPDATE sessions 
+        SET ${updateField} = ?, 
+            status = 'completed', 
+            duration = COALESCE(duration, ?)
+        WHERE id = ?
+      `).bind(rating, duration, session_id).run();
+      
+      const updatedSession: any = await env.DB.prepare("SELECT * FROM sessions WHERE id = ?").bind(session_id).first();
+      
+      // Only award points if BOTH have rated
+      if (updatedSession.user1_rating && updatedSession.user2_rating) {
+         // Good/Good = 2 pts each | Meh/Meh = 1 pt each | Mixed = 2 to Good receiver, 1 to Meh receiver
+         const ptsForUser1 = updatedSession.user2_rating === 'good' ? 2 : 1;
+         const ptsForUser2 = updatedSession.user1_rating === 'good' ? 2 : 1;
+         const now = new Date().toISOString().replace('T', ' ').split('.')[0];
+
+         await env.DB.batch([
+           env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(ptsForUser1, session.user1_id),
+           env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call_reward', ?, ?)").bind(uuid(), session.user1_id, ptsForUser1, session_id, now),
+           env.DB.prepare("UPDATE users SET points = points + ? WHERE id = ?").bind(ptsForUser2, session.user2_id),
+           env.DB.prepare("INSERT INTO point_transactions (id, user_id, points, activity_type, session_id, created_at) VALUES (?, ?, ?, 'video_call_reward', ?, ?)").bind(uuid(), session.user2_id, ptsForUser2, session_id, now)
+         ]);
+
+         return Response.json({ success: true, points_awarded: isUser1 ? ptsForUser1 : ptsForUser2 }, { headers: corsHeaders });
+      }
+      return Response.json({ success: true, message: "Rating saved. Waiting for partner to rate." }, { headers: corsHeaders });
     }
-
-    return Response.json({ success: true, message: "Rating saved. Waiting for partner to rate." }, { headers: corsHeaders });
-
-  } catch (error: any) {
-    console.error('Rating error:', error);
-    return Response.json({ error: 'Failed to process rating' }, { status: 500, headers: corsHeaders });
-  }
-}
 
     if (url.pathname === '/api/signal') {
       const sessionId = url.searchParams.get('sessionId');
