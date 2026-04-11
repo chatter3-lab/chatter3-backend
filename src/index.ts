@@ -177,13 +177,16 @@ export default {
         SELECT 
           s.id, s.created_at, s.ended_at, s.duration,
           CASE WHEN s.user1_id = ? THEN u2.username ELSE u1.username END as partner_name,
-          CASE WHEN s.user1_id = ? THEN u2.avatar_url ELSE u1.avatar_url END as partner_avatar
+          CASE WHEN s.user1_id = ? THEN u2.avatar_url ELSE u1.avatar_url END as partner_avatar,
+          pt.points as points_earned
         FROM sessions s
         JOIN users u1 ON s.user1_id = u1.id
         JOIN users u2 ON s.user2_id = u2.id
+        LEFT JOIN point_transactions pt
+          ON pt.session_id = s.id AND pt.user_id = ? AND pt.activity_type = 'video_call_reward'
         WHERE (s.user1_id = ? OR s.user2_id = ?) AND s.status = 'completed'
         ORDER BY s.created_at DESC LIMIT 20
-      `).bind(user_id, user_id, user_id, user_id).all();
+      `).bind(user_id, user_id, user_id, user_id, user_id).all();
       return Response.json({ success: true, history: history.results }, { headers: corsHeaders });
     }
 
