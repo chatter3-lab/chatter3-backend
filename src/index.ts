@@ -198,12 +198,53 @@ export default {
 
     // --- MATCHING ROUTES ---
     if (url.pathname === '/api/matching/join' && request.method === 'POST') {
-      const { user_id, english_level } = await request.json() as any;
+      const { user_id, english_level, country, native_language } = await request.json() as any;
       try { await env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now', '-12 seconds')").run(); } catch (e) { }
 
-      const match = await env.DB.prepare(
-        `SELECT * FROM matching_queue WHERE english_level = ? AND user_id != ? ORDER BY joined_at ASC LIMIT 1`
-      ).bind(english_level, user_id).first();
+      // Fetch caller's profile for cross-country/language filtering and block checks
+      const caller: any = await env.DB.prepare(
+        'SELECT country, native_language FROM users WHERE id = ?'
+      ).bind(user_id).first();
+      const callerCountry = (caller?.country || country || '').trim().toLowerCase();
+      const callerLang   = (caller?.native_language || native_language || '').trim().toLowerCase();
+
+      // Find a match:
+      //  - same english_level
+      //  - NOT the same user
+      //  - DIFFERENT country (cross-cultural matching)
+      //  - DIFFERENT native language (cross-language matching)
+      //  - NOT blocked by either party
+      //
+      // Falls back gracefully: if no cross-country/language match exists after 20s,
+      // the strict filter is relaxed to avoid indefinite waits.
+      const queueEntry: any = await env.DB.prepare(
+        `SELECT mq.user_id, u.country, u.native_language
+         FROM matching_queue mq
+         JOIN users u ON mq.user_id = u.id
+         WHERE mq.english_level = ?
+           AND mq.user_id != ?
+           AND (? = '' OR LOWER(COALESCE(u.country,'')) != ?)
+           AND (? = '' OR LOWER(COALESCE(u.native_language,'')) != ?)
+           AND mq.user_id NOT IN (
+             SELECT blocked_id FROM user_blocks WHERE blocker_id = ?
+             UNION
+             SELECT blocker_id FROM user_blocks WHERE blocked_id = ?
+           )
+         ORDER BY mq.joined_at ASC LIMIT 1`
+      ).bind(english_level, user_id, callerCountry, callerCountry, callerLang, callerLang, user_id, user_id).first();
+
+      // Fallback: if strict match fails, try relaxed (any country/language, just not blocked)
+      const match: any = queueEntry || await env.DB.prepare(
+        `SELECT mq.user_id FROM matching_queue mq
+         WHERE mq.english_level = ?
+           AND mq.user_id != ?
+           AND mq.user_id NOT IN (
+             SELECT blocked_id FROM user_blocks WHERE blocker_id = ?
+             UNION
+             SELECT blocker_id FROM user_blocks WHERE blocked_id = ?
+           )
+         ORDER BY mq.joined_at ASC LIMIT 1`
+      ).bind(english_level, user_id, user_id, user_id).first();
 
       if (match) {
         const sessionId = uuid();
@@ -304,6 +345,53 @@ export default {
         return Response.json({ success: true, points_awarded: isUser1 ? ptsForUser1 : ptsForUser2 }, { headers: corsHeaders });
       }
       return Response.json({ success: true, message: "Rating saved. Waiting for partner to rate." }, { headers: corsHeaders });
+    }
+
+    // --- REPORT endpoint ---
+    if (url.pathname === '/api/report' && request.method === 'POST') {
+      try {
+        const { reporter_id, reported_id, session_id, reason } = await request.json() as any;
+        if (!reporter_id || !reported_id) return Response.json({ success: false, error: 'Missing fields' }, { headers: corsHeaders });
+        const id = uuid();
+        await env.DB.prepare(
+          `INSERT INTO user_reports (id, reporter_id, reported_id, session_id, reason, created_at)
+           VALUES (?, ?, ?, ?, ?, datetime('now'))`
+        ).bind(id, reporter_id, reported_id, session_id || null, reason || '').run();
+        return Response.json({ success: true }, { headers: corsHeaders });
+      } catch (e: any) {
+        return Response.json({ success: false, error: e.message }, { headers: corsHeaders });
+      }
+    }
+
+    // --- BLOCK endpoint ---
+    if (url.pathname === '/api/block' && request.method === 'POST') {
+      try {
+        const { blocker_id, blocked_id } = await request.json() as any;
+        if (!blocker_id || !blocked_id) return Response.json({ success: false, error: 'Missing fields' }, { headers: corsHeaders });
+        const id = uuid();
+        await env.DB.prepare(
+          `INSERT OR IGNORE INTO user_blocks (id, blocker_id, blocked_id, created_at)
+           VALUES (?, ?, ?, datetime('now'))`
+        ).bind(id, blocker_id, blocked_id).run();
+        return Response.json({ success: true }, { headers: corsHeaders });
+      } catch (e: any) {
+        return Response.json({ success: false, error: e.message }, { headers: corsHeaders });
+      }
+    }
+
+    // --- GET BLOCK LIST ---
+    if (url.pathname.startsWith('/api/block/list/') && request.method === 'GET') {
+      try {
+        const userId = url.pathname.split('/').pop();
+        const blocks = await env.DB.prepare(
+          `SELECT ub.blocked_id, u.username, u.nickname, u.avatar_url, ub.created_at
+           FROM user_blocks ub JOIN users u ON ub.blocked_id = u.id
+           WHERE ub.blocker_id = ? ORDER BY ub.created_at DESC`
+        ).bind(userId).all();
+        return Response.json({ success: true, blocks: blocks.results }, { headers: corsHeaders });
+      } catch (e: any) {
+        return Response.json({ success: false, error: e.message }, { headers: corsHeaders });
+      }
     }
 
     if (url.pathname === '/api/signal') {
