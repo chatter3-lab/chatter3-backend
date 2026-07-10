@@ -467,6 +467,46 @@ export default{
     }
 
     // ── SIGNAL ─────────────────────────────────────────────────
+    // Refund FP if session never connected
+    if(p==='/api/matching/refund-fp'&&req.method==='POST'){
+      const{session_id,user_id}=await req.json() as any;
+      const sess:any=await env.DB.prepare('SELECT * FROM sessions WHERE id=?').bind(session_id).first();
+      if(!sess)return json({success:false,error:'Session not found'});
+      // Only refund if session was never completed (still active or just created)
+      if(sess.status==='active'){
+        await env.DB.batch([
+          env.DB.prepare('UPDATE users SET fp_balance=fp_balance+1 WHERE id=?').bind(sess.user1_id),
+          env.DB.prepare('UPDATE users SET fp_balance=fp_balance+1 WHERE id=?').bind(sess.user2_id),
+          env.DB.prepare("UPDATE sessions SET status='failed' WHERE id=?").bind(session_id),
+        ]);
+        return json({success:true,refunded:true});
+      }
+      return json({success:true,refunded:false});
+    }
+
+    // Admin: all users paginated
+    if(p==='/api/admin/users/all'&&req.method==='POST'){
+      const{admin_id,offset=0,limit=50}=await req.json() as any;
+      if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      const[total,users]:any[]= await Promise.all([
+        env.DB.prepare('SELECT COUNT(*) as c FROM users').first(),
+        env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,country,native_language,created_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(limit,offset).all(),
+      ]);
+      return json({success:true,users:users.results||[],total:total?.c||0});
+    }
+
+    // Admin: export all users as CSV
+    if(p==='/api/admin/users/export'&&req.method==='POST'){
+      const{admin_id}=await req.json() as any;
+      if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      const users=await env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,ban_reason,country,native_language,created_at,last_active FROM users ORDER BY created_at DESC').all();
+      const rows=users.results||[];
+      const headers=['id','username','nickname','email','english_level','fp_balance','rp_balance','is_admin','is_banned','ban_reason','country','native_language','created_at','last_active'];
+      const escape=(v:any)=>v==null?'':String(v).replace(/"/g,'""');
+      const csv=[headers.join(','),...rows.map((r:any)=>headers.map(h=>`"${escape(r[h])}"`).join(','))].join('\n');
+      return json({success:true,csv});
+    }
+
     if(p==='/api/signal'){
       const sid=url.searchParams.get('sessionId');
       if(!sid)return new Response('Missing sessionId',{status:400});
