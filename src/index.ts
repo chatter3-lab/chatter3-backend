@@ -84,7 +84,6 @@ export default{
         env.DB.prepare('SELECT COUNT(*) as c FROM matching_queue').first(),
         env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE status='active'").first(),
         env.DB.prepare('SELECT english_level,COUNT(*) as c FROM matching_queue GROUP BY english_level').all(),
-        env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now','-15 seconds')").run(),
       ]);
       const by_level:Record<string,number>={};
       for(const r of (bl.results||[]))by_level[(r as any).english_level]=(r as any).c;
