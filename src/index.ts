@@ -80,14 +80,17 @@ export default{
 
     // Online stats with by_level
     if(p==='/api/stats/online'){
-      const[q,s,bl]:any[]=await Promise.all([
+      const[q,s,bl,a]:any[]=await Promise.all([
         env.DB.prepare('SELECT COUNT(*) as c FROM matching_queue').first(),
         env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE status='active'").first(),
         env.DB.prepare('SELECT english_level,COUNT(*) as c FROM matching_queue GROUP BY english_level').all(),
+        env.DB.prepare("SELECT COUNT(*) as c FROM users WHERE last_active >= datetime('now','-2 minutes')").first(),
       ]);
       const by_level:Record<string,number>={};
       for(const r of (bl.results||[]))by_level[(r as any).english_level]=(r as any).c;
-      return json({searching:q?.c||0,in_call:(s?.c||0)*2,total:(q?.c||0)+(s?.c||0)*2,by_level});
+      const total = (q?.c||0) + ((s?.c||0)*2) + (a?.c||0);
+      return json({searching:q?.c||0,in_call:(s?.c||0)*2,total,by_level});
+    }
     }
 
     // ── AUTH ───────────────────────────────────────────────────
@@ -140,6 +143,7 @@ export default{
     if(p.startsWith('/api/user/balances/')){
       const uid=p.split('/').pop();
       await ensureDailyFP(env.DB,uid as string);
+      await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
       const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance FROM users WHERE id=?').bind(uid).first();
       return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0});
     }
@@ -171,6 +175,7 @@ export default{
 
     if(p.startsWith('/api/user/')&&req.method==='GET'&&!p.includes('/balances')){
       const uid=p.split('/').pop();
+      await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
       return json({success:true,user:await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(uid).first()});
     }
 
