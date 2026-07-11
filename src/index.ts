@@ -79,7 +79,9 @@ export default{
     }
 
     // Online stats with by_level
-    if(p==='/api/stats/online'){
+    if(p==='/api/stats/online'){  
+      // Purge stale matching_queue entries
+      env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now','-10 seconds')").run().catch(()=>{});
       const[q,s,bl]:any[]=await Promise.all([
         env.DB.prepare('SELECT COUNT(*) as c FROM matching_queue').first(),
         env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE status='active'").first(),
