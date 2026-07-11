@@ -80,10 +80,11 @@ export default{
 
     // Online stats with by_level
     if(p==='/api/stats/online'){
+      env.DB.prepare("DELETE FROM matching_queue WHERE joined_at < datetime('now','-10 seconds')").run().catch(()=>{});
       const[q,s,bl]:any[]=await Promise.all([
-        env.DB.prepare("SELECT COUNT(*) as c FROM matching_queue WHERE joined_at >= datetime('now','-10 seconds')").first(),
+        env.DB.prepare('SELECT COUNT(*) as c FROM matching_queue').first(),
         env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE status='active'").first(),
-        env.DB.prepare("SELECT english_level,COUNT(*) as c FROM matching_queue WHERE joined_at >= datetime('now','-10 seconds') GROUP BY english_level").all(),
+        env.DB.prepare('SELECT english_level,COUNT(*) as c FROM matching_queue GROUP BY english_level').all(),
       ]);
       const by_level:Record<string,number>={};
       for(const r of (bl.results||[]))by_level[(r as any).english_level]=(r as any).c;
