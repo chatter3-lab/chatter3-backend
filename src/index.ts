@@ -91,7 +91,6 @@ export default{
       const total = (q?.c||0) + ((s?.c||0)*2) + (a?.c||0);
       return json({searching:q?.c||0,in_call:(s?.c||0)*2,total,by_level});
     }
-    }
 
     // ── AUTH ───────────────────────────────────────────────────
     if(p==='/api/auth/google'&&req.method==='POST'){
