@@ -411,11 +411,10 @@ export default{
           SUM(CASE WHEN connected_at IS NOT NULL THEN 1 ELSE 0 END) as connected,
           AVG(CASE WHEN connected_at IS NOT NULL AND created_at IS NOT NULL THEN 
             (julianday(connected_at) - julianday(created_at)) * 86400 END) as avg_time_to_connect,
+          SUM(CASE WHEN disconnect_reason IN ('hangup','partner') THEN 1 ELSE 0 END) as intentional_ends,
           SUM(CASE WHEN disconnect_reason='network' THEN 1 ELSE 0 END) as network_disconnects,
-          SUM(CASE WHEN disconnect_reason='hangup' THEN 1 ELSE 0 END) as hangups,
-          SUM(CASE WHEN disconnect_reason='partner' THEN 1 ELSE 0 END) as partner_disconnects,
-          SUM(CASE WHEN disconnect_reason='timeout' THEN 1 ELSE 0 END) as timeouts,
-          SUM(CASE WHEN disconnect_reason='connection_issue' THEN 1 ELSE 0 END) as connection_issues
+          SUM(CASE WHEN disconnect_reason='connection_issue' THEN 1 ELSE 0 END) as connection_issues,
+          SUM(CASE WHEN disconnect_reason='timeout' THEN 1 ELSE 0 END) as timeouts
         FROM sessions WHERE created_at>=DATE('now','-30 days')`).first(),
       ]);
       const sbd=await env.DB.prepare("SELECT DATE(created_at) as day,COUNT(*) as c FROM sessions WHERE created_at>=DATE('now','-30 days') GROUP BY day ORDER BY day DESC LIMIT 30").all();
