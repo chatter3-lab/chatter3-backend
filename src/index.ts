@@ -315,7 +315,7 @@ export default{
       const sess:any=await env.DB.prepare('SELECT * FROM sessions WHERE id=?').bind(session_id).first();
       if(sess&&sess.status==='active'){
         const dur=Math.floor((Date.now()-new Date(sess.created_at).getTime())/1000);
-        await env.DB.prepare("UPDATE sessions SET status='completed',ended_at=datetime('now'),duration=? WHERE id=?").bind(dur,session_id).run();
+        await env.DB.prepare("UPDATE sessions SET status='completed',ended_at=datetime('now'),duration=?,disconnect_reason=? WHERE id=?").bind(dur,reason||'hangup',session_id).run();
       }
       return json({success:true});
     }
@@ -486,6 +486,23 @@ export default{
         return json({success:true,refunded:true});
       }
       return json({success:true,refunded:false});
+    }
+
+    // Connection event logging
+    if(p==='/api/connection/event'&&req.method==='POST'){
+      const{session_id,user_id,event_type,event_data,user_agent}=await req.json() as any;
+      if(!session_id||!user_id||!event_type)return json({success:false,error:'Missing fields'},400);
+      const id=uuid();
+      await env.DB.prepare("INSERT INTO connection_events(id,session_id,user_id,event_type,event_data,user_agent,created_at)VALUES(?,?,?,?,?,?,datetime('now'))").bind(id,session_id,user_id,event_type,event_data||'{}',user_agent||'').run().catch(()=>{});
+      // Update session with connection timestamps
+      if(event_type==='connected'){
+        await env.DB.prepare("UPDATE sessions SET connected_at=datetime('now') WHERE id=? AND connected_at IS NULL").bind(session_id).run().catch(()=>{});
+      }
+      if(event_type==='failed' || event_type==='disconnected'){
+        const reason=event_type==='failed'?'ice_failed':'disconnected';
+        await env.DB.prepare("UPDATE sessions SET disconnect_reason=? WHERE id=? AND disconnect_reason IS NULL").bind(reason,session_id).run().catch(()=>{});
+      }
+      return json({success:true});
     }
 
     // Admin: all users paginated
