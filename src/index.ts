@@ -392,11 +392,11 @@ export default{
     }
 
     // Admin: stats
-    if(p==='/api/admin/stats'&&req.method==='POST'){
+if(p==='/api/admin/stats'&&req.method==='POST'){
       const{admin_id}=await req.json() as any;
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
       const today=todayUTC(),monthStart=today.slice(0,7)+'-01';
-      const[tu,dau,mau,ts,as2,qs,pr,nt,connStats]:any[]=await Promise.all([
+const[tu,dau,mau,ts,as2,qs,pr,nt,connStats,sessionStats,queueStats,crossBorderStats,browserStats,rematchStats,queueDepthStats,fpRpStats,retentionStats,reportStats]:any[]=await Promise.all([
         env.DB.prepare('SELECT COUNT(*) as c FROM users').first(),
         env.DB.prepare('SELECT COUNT(DISTINCT user_id) as c FROM point_transactions WHERE created_at>=?').bind(today).first(),
         env.DB.prepare('SELECT COUNT(DISTINCT user_id) as c FROM point_transactions WHERE created_at>=?').bind(monthStart).first(),
@@ -407,7 +407,6 @@ export default{
         env.DB.prepare('SELECT COUNT(*) as c FROM users WHERE created_at>=?').bind(today).first(),
         env.DB.prepare(`SELECT 
           COUNT(*) as total_sessions,
-          SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
           SUM(CASE WHEN connected_at IS NOT NULL THEN 1 ELSE 0 END) as connected,
           AVG(CASE WHEN connected_at IS NOT NULL AND created_at IS NOT NULL THEN 
             (julianday(connected_at) - julianday(created_at)) * 86400 END) as avg_time_to_connect,
@@ -416,9 +415,80 @@ export default{
           SUM(CASE WHEN disconnect_reason='connection_issue' THEN 1 ELSE 0 END) as connection_issues,
           SUM(CASE WHEN disconnect_reason='timeout' THEN 1 ELSE 0 END) as timeouts
         FROM sessions WHERE created_at>=DATE('now','-30 days')`).first(),
+        env.DB.prepare(`SELECT 
+          COUNT(*) as completed_sessions,
+          AVG(duration) as avg_duration,
+          MAX(duration) as max_duration,
+          SUM(CASE WHEN duration IS NOT NULL AND custom_duration IS NOT NULL AND duration >= custom_duration THEN 1 ELSE 0 END) as completed_full,
+          SUM(CASE WHEN duration IS NOT NULL AND custom_duration IS NULL AND english_level='beginner' AND duration >= 270 THEN 1 ELSE 0 END) as completed_full_beginner,
+          SUM(CASE WHEN duration IS NOT NULL AND custom_duration IS NULL AND english_level!='beginner' AND duration >= 540 THEN 1 ELSE 0 END) as completed_full_other,
+          SUM(CASE WHEN user1_rating='good' OR user2_rating='good' THEN 1 ELSE 0 END) as good_ratings,
+          SUM(CASE WHEN user1_rating='meh' OR user2_rating='meh' THEN 1 ELSE 0 END) as meh_ratings,
+          SUM(CASE WHEN user1_rating='connection_issue' OR user2_rating='connection_issue' THEN 1 ELSE 0 END) as connection_issue_ratings
+        FROM sessions WHERE status='completed' AND created_at>=DATE('now','-30 days')`).first(),
+        env.DB.prepare(`SELECT 
+          AVG(CASE WHEN matched_at IS NOT NULL AND joined_at IS NOT NULL THEN 
+            (julianday(matched_at) - julianday(joined_at)) * 86400 END) as avg_wait,
+          MIN(CASE WHEN matched_at IS NOT NULL AND joined_at IS NOT NULL THEN 
+            (julianday(matched_at) - julianday(joined_at)) * 86400 END) as min_wait,
+          MAX(CASE WHEN matched_at IS NOT NULL AND joined_at IS NOT NULL THEN 
+            (julianday(matched_at) - julianday(joined_at)) * 86400 END) as max_wait
+        FROM matching_queue WHERE matched_at IS NOT NULL AND created_at>=DATE('now','-30 days')`).first(),
+        env.DB.prepare(`SELECT 
+          COUNT(*) as total_matches,
+          SUM(CASE WHEN u1.country != u2.country THEN 1 ELSE 0 END) as cross_border
+        FROM sessions s
+        JOIN users u1 ON s.user1_id = u1.id
+        JOIN users u2 ON s.user2_id = u2.id
+        WHERE s.created_at>=DATE('now','-30 days')`).first(),
+        env.DB.prepare(`SELECT 
+          CASE 
+            WHEN user_agent LIKE '%Chrome%' THEN 'Chrome'
+            WHEN user_agent LIKE '%Firefox%' THEN 'Firefox'
+            WHEN user_agent LIKE '%Safari%' THEN 'Safari'
+            WHEN user_agent LIKE '%Edg%' THEN 'Edge'
+            ELSE 'Other'
+          END as browser,
+          COUNT(*) as failures
+        FROM connection_events
+        WHERE event_type IN ('failed','disconnected') AND created_at>=DATE('now','-30 days')
+        GROUP BY browser`).all(),
+        env.DB.prepare(`SELECT 
+          COUNT(*) as rematches
+        FROM sessions s1
+        JOIN sessions s2 ON s1.user1_id = s2.user1_id AND s1.user2_id = s2.user2_id
+        WHERE s1.created_at < s2.created_at
+          AND s2.created_at <= datetime(s1.created_at, '+24 hours')
+          AND s2.created_at >= DATE('now','-30 days')
+          AND s1.status='completed' AND s2.status='completed'`).first(),
+        env.DB.prepare(`SELECT 
+          DATE(created_at) as day,
+          COUNT(*) as queue_size
+        FROM matching_queue
+        WHERE created_at>=DATE('now','-30 days')
+        GROUP BY DATE(created_at)
+        ORDER BY day DESC LIMIT 30`).all(),
+        env.DB.prepare(`SELECT 
+          SUM(CASE WHEN activity_type='fp_earned' THEN points ELSE 0 END) as fp_earned,
+          SUM(CASE WHEN activity_type='fp_spent' THEN points ELSE 0 END) as fp_spent,
+          SUM(CASE WHEN activity_type='rp_earned' THEN points ELSE 0 END) as rp_earned,
+          COUNT(DISTINCT user_id) as active_users
+        FROM point_transactions
+        WHERE created_at>=DATE('now','-30 days')`).first(),
+        env.DB.prepare(`SELECT 
+          COUNT(DISTINCT u.id) as total_users,
+          SUM(CASE WHEN u.created_at >= DATE('now','-1 day') THEN 1 ELSE 0 END) as d1_users,
+          SUM(CASE WHEN u.created_at >= DATE('now','-7 days') THEN 1 ELSE 0 END) as d7_users,
+          SUM(CASE WHEN u.created_at >= DATE('now','-30 days') THEN 1 ELSE 0 END) as d30_users
+        FROM users u`).first(),
+        env.DB.prepare(`SELECT 
+          COUNT(*) as total_reports,
+          COUNT(*) * 1000.0 / NULLIF((SELECT COUNT(*) FROM sessions WHERE status='completed' AND created_at>=DATE('now','-30 days')), 0) as reports_per_1000
+        FROM user_reports
+        WHERE created_at>=DATE('now','-30 days')`).first(),
       ]);
       const sbd=await env.DB.prepare("SELECT DATE(created_at) as day,COUNT(*) as c FROM sessions WHERE created_at>=DATE('now','-30 days') GROUP BY day ORDER BY day DESC LIMIT 30").all();
-      return json({total_users:tu?.c||0,dau:dau?.c||0,mau:mau?.c||0,total_sessions:ts?.c||0,active_sessions:as2?.c||0,queue_size:qs?.c||0,pending_reports:pr?.c||0,new_users_today:nt?.c||0,sessions_by_day:sbd.results||[],connection_stats:connStats||{}});
+      return json({total_users:tu?.c||0,dau:dau?.c||0,mau:mau?.c||0,total_sessions:ts?.c||0,active_sessions:as2?.c||0,queue_size:qs?.c||0,pending_reports:pr?.c||0,new_users_today:nt?.c||0,sessions_by_day:sbd.results||[],connection_stats:connStats||{},session_stats:sessionStats||{},queue_stats:queueStats||{},cross_border_stats:crossBorderStats||{},browser_stats:browserStats?.results||[],rematch_stats:rematchStats||{},queue_depth_stats:queueDepthStats||{},fp_rp_stats:fpRpStats||{},retention_stats:retentionStats||{},report_stats:reportStats||{}});
     }
 
     // Admin: user search
