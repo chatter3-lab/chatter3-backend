@@ -273,7 +273,7 @@ export default{
       if(cfg.matchByLevel){strictQ+=` AND mq.english_level=?`;strictB.push(english_level);}
       if(cfg.matchDiffCountry&&cCountry){strictQ+=` AND (?='' OR LOWER(COALESCE(u.country,''))!=?)`;strictB.push(cCountry,cCountry);}
       if(cfg.matchDiffLang&&cLang){strictQ+=` AND (?='' OR LOWER(COALESCE(u.native_language,''))!=?)`;strictB.push(cLang,cLang);}
-      strictQ+=` AND mq.user_id NOT IN(SELECT blocked_id FROM user_blocks WHERE blocker_id=? UNION SELECT blocker_id FROM user_blocks WHERE blocked_id=?) ORDER BY mq.joined_at ASC LIMIT 1`;
+      strictQ+=` AND mq.user_id NOT IN(SELECT blocked_id FROM user_blocks WHERE blocker_id=? UNION SELECT blocker_id FROM user_blocks WHERE blocked_id=?) AND mq.user_id NOT IN(SELECT user1_id FROM sessions WHERE status='active' UNION SELECT user2_id FROM sessions WHERE status='active') ORDER BY mq.joined_at ASC LIMIT 1`;
       strictB.push(user_id,user_id);
 
       const match:any=await env.DB.prepare(strictQ).bind(...strictB).first();
