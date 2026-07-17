@@ -396,7 +396,7 @@ export default{
       const{admin_id}=await req.json() as any;
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
       const today=todayUTC(),monthStart=today.slice(0,7)+'-01';
-      const[tu,dau,mau,ts,as2,qs,pr,nt]:any[]=await Promise.all([
+      const[tu,dau,mau,ts,as2,qs,pr,nt,connStats]:any[]=await Promise.all([
         env.DB.prepare('SELECT COUNT(*) as c FROM users').first(),
         env.DB.prepare('SELECT COUNT(DISTINCT user_id) as c FROM point_transactions WHERE created_at>=?').bind(today).first(),
         env.DB.prepare('SELECT COUNT(DISTINCT user_id) as c FROM point_transactions WHERE created_at>=?').bind(monthStart).first(),
@@ -405,9 +405,21 @@ export default{
         env.DB.prepare('SELECT COUNT(*) as c FROM matching_queue').first(),
         env.DB.prepare("SELECT COUNT(*) as c FROM user_reports WHERE status='pending'").first(),
         env.DB.prepare('SELECT COUNT(*) as c FROM users WHERE created_at>=?').bind(today).first(),
+        env.DB.prepare(`SELECT 
+          COUNT(*) as total_sessions,
+          SUM(CASE WHEN status='completed' THEN 1 ELSE 0 END) as completed,
+          SUM(CASE WHEN connected_at IS NOT NULL THEN 1 ELSE 0 END) as connected,
+          AVG(CASE WHEN connected_at IS NOT NULL AND created_at IS NOT NULL THEN 
+            (julianday(connected_at) - julianday(created_at)) * 86400 END) as avg_time_to_connect,
+          SUM(CASE WHEN disconnect_reason='network' THEN 1 ELSE 0 END) as network_disconnects,
+          SUM(CASE WHEN disconnect_reason='hangup' THEN 1 ELSE 0 END) as hangups,
+          SUM(CASE WHEN disconnect_reason='partner' THEN 1 ELSE 0 END) as partner_disconnects,
+          SUM(CASE WHEN disconnect_reason='timeout' THEN 1 ELSE 0 END) as timeouts,
+          SUM(CASE WHEN disconnect_reason='connection_issue' THEN 1 ELSE 0 END) as connection_issues
+        FROM sessions WHERE created_at>=DATE('now','-30 days')`).first(),
       ]);
       const sbd=await env.DB.prepare("SELECT DATE(created_at) as day,COUNT(*) as c FROM sessions WHERE created_at>=DATE('now','-30 days') GROUP BY day ORDER BY day DESC LIMIT 30").all();
-      return json({total_users:tu?.c||0,dau:dau?.c||0,mau:mau?.c||0,total_sessions:ts?.c||0,active_sessions:as2?.c||0,queue_size:qs?.c||0,pending_reports:pr?.c||0,new_users_today:nt?.c||0,sessions_by_day:sbd.results||[]});
+      return json({total_users:tu?.c||0,dau:dau?.c||0,mau:mau?.c||0,total_sessions:ts?.c||0,active_sessions:as2?.c||0,queue_size:qs?.c||0,pending_reports:pr?.c||0,new_users_today:nt?.c||0,sessions_by_day:sbd.results||[],connection_stats:connStats||{}});
     }
 
     // Admin: user search
