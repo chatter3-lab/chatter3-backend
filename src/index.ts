@@ -47,7 +47,17 @@ async function getSettings(db:D1Database){
     matchDiffCountry:(m['matching_diff_country']??(''))==='true',
     matchDiffLang: (m['matching_diff_language']??(''))==='true',
     customDuration:parseInt(m['custom_call_duration']||'0'),
+    promoFpFreeDays:parseInt(m['promo_fp_free_days']||'0'),
+    promoInitialRp:parseInt(m['promo_initial_rp']||'0'),
+    promoBadgeDays:parseInt(m['promo_badge_days']||'0'),
   };
+}
+
+// Check if a user is within the founding member promo window
+function isFoundingMember(created_at:any,promoBadgeDays:number){
+  if(!promoBadgeDays||!created_at)return false;
+  const age=Date.now()-new Date(created_at).getTime();
+  return age<promoBadgeDays*86400000;
 }
 
 // ── Signaling DO ─────────────────────────────────────────────
@@ -100,10 +110,16 @@ export default{
         const pl=JSON.parse(atob(pts[1].replace(/-/g,'+').replace(/_/g,'/')));
         const email=pl.email,name=pl.name||email.split('@')[0],pic=pl.picture||'';
         const isAdmin=ADMIN_EMAILS.includes(email)?1:0;
+        const cfg=await getSettings(env.DB);
+        const initRp=cfg.promoInitialRp||0;
         let user:any=await env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first();
         if(!user){
           const id=uuid();
           await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,is_admin,created_at,avatar_url,nickname)VALUES(?,?,?,'google_oauth_user','beginner',0,?,?,0,?,datetime('now'),?,?)`).bind(id,name,email,DAILY_FP,todayUTC(),isAdmin,pic,name).run();
+          if(initRp>0){
+            await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
+            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
+          }
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
           // Track invite usage
           if(ref){
@@ -114,6 +130,7 @@ export default{
           await ensureDailyFP(env.DB,user.id);
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
         }
+        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays);
         return json({success:true,user});
       }catch{return json({success:false,error:'Invalid token'});}
     }
@@ -121,10 +138,17 @@ export default{
     if(p==='/api/auth/register'&&req.method==='POST'){
       const{email,username,english_level,country,native_language,ref}=await req.json() as any;
       const id=uuid();
+      const cfg=await getSettings(env.DB);
+      const initRp=cfg.promoInitialRp||0;
       try{
         await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,'email_user',?,0,?,?,0,?,?,datetime('now'))`).bind(id,username,email,english_level||'beginner',DAILY_FP,todayUTC(),country||'',native_language||'').run();
+        if(initRp>0){
+          await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
+          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
+        }
         if(ref)await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
-        const user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
+        const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
+        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays);
         return json({success:true,user});
       }catch{return json({success:false,error:'User already exists'});}
     }
@@ -135,7 +159,10 @@ export default{
       if(!user)return json({success:false,error:'User not found'});
       if(user.is_banned)return json({success:false,error:'Account suspended. Contact support.'});
       await ensureDailyFP(env.DB,user.id);
-      return json({success:true,user:await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first()});
+      const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
+      const cfg=await getSettings(env.DB);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays);
+      return json({success:true,user:u});
     }
 
     // ── USER ───────────────────────────────────────────────────
@@ -143,8 +170,9 @@ export default{
       const uid=p.split('/').pop();
       await ensureDailyFP(env.DB,uid as string);
       await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
-      const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance FROM users WHERE id=?').bind(uid).first();
-      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0});
+      const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance,created_at FROM users WHERE id=?').bind(uid).first();
+      const cfg=await getSettings(env.DB);
+      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.created_at,cfg.promoBadgeDays)});
     }
 
     if(p==='/api/user/exchange-rp'&&req.method==='POST'){
@@ -163,7 +191,10 @@ export default{
     if(p==='/api/user/update'&&req.method==='POST'){
       const{id,nickname,country,native_language,english_level,bio,avatar_url}=await req.json() as any;
       await env.DB.prepare('UPDATE users SET nickname=?,country=?,native_language=?,english_level=?,bio=?,avatar_url=? WHERE id=?').bind(nickname,country,native_language,english_level,bio,avatar_url,id).run();
-      return json({success:true,user:await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first()});
+      const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
+      const cfg=await getSettings(env.DB);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays);
+      return json({success:true,user:u});
     }
 
     if(p==='/api/user/history'&&req.method==='POST'){
@@ -175,7 +206,11 @@ export default{
     if(p.startsWith('/api/user/')&&req.method==='GET'&&!p.includes('/balances')){
       const uid=p.split('/').pop();
       await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
-      return json({success:true,user:await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(uid).first()});
+      const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(uid).first();
+      if(!u)return json({success:false,error:'User not found'});
+      const cfg=await getSettings(env.DB);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays);
+      return json({success:true,user:u});
     }
 
     // ── INVITE ─────────────────────────────────────────────────
@@ -255,13 +290,13 @@ export default{
     if(p==='/api/matching/join'&&req.method==='POST'){
       const{user_id,english_level,country,native_language}=await req.json() as any;
       await ensureDailyFP(env.DB,user_id);
-      const caller:any=await env.DB.prepare('SELECT fp_balance,country,native_language,is_banned FROM users WHERE id=?').bind(user_id).first();
+      const cfg=await getSettings(env.DB);
+      const caller:any=await env.DB.prepare('SELECT fp_balance,country,native_language,is_banned,created_at FROM users WHERE id=?').bind(user_id).first();
       if(!caller)return json({success:false,error:'User not found'});
       if(caller.is_banned)return json({success:false,error:'Account suspended'});
-      if((caller.fp_balance||0)<1)return json({success:false,error:'insufficient_fp',fp:caller.fp_balance});
+      const inFreePeriod=cfg.promoFpFreeDays>0&&isFoundingMember(caller.created_at,cfg.promoFpFreeDays);
+      if(!inFreePeriod&&(caller.fp_balance||0)<1)return json({success:false,error:'insufficient_fp',fp:caller.fp_balance});
 
-      // Read admin-controlled settings from DB
-      const cfg=await getSettings(env.DB);
       const cCountry=(caller.country||country||'').trim().toLowerCase();
       const cLang=(caller.native_language||native_language||'').trim().toLowerCase();
 
@@ -280,14 +315,17 @@ export default{
 
       if(match){
         const sid=uuid();const pid=match.user_id as string;
-        // Determine call duration — custom if set, otherwise level-based
-        await env.DB.batch([
-          env.DB.prepare("UPDATE users SET fp_balance=fp_balance-1 WHERE id=? AND fp_balance>=1").bind(user_id),
-          env.DB.prepare("UPDATE users SET fp_balance=fp_balance-1 WHERE id=? AND fp_balance>=1").bind(pid),
+        // Deduct FP only if neither user is in free period
+        const partner:any=await env.DB.prepare('SELECT created_at FROM users WHERE id=?').bind(pid).first();
+        const partnerFree=cfg.promoFpFreeDays>0&&isFoundingMember(partner?.created_at,cfg.promoFpFreeDays);
+        const batch:any[]=[
           env.DB.prepare("INSERT INTO sessions(id,user1_id,user2_id,english_level,status,created_at)VALUES(?,?,?,?,'active',datetime('now'))").bind(sid,user_id,pid,english_level),
           env.DB.prepare('DELETE FROM matching_queue WHERE user_id=?').bind(pid),
           env.DB.prepare('DELETE FROM matching_queue WHERE user_id=?').bind(user_id),
-        ]);
+        ];
+        if(!inFreePeriod)batch.unshift(env.DB.prepare("UPDATE users SET fp_balance=fp_balance-1 WHERE id=? AND fp_balance>=1").bind(user_id));
+        if(!partnerFree)batch.unshift(env.DB.prepare("UPDATE users SET fp_balance=fp_balance-1 WHERE id=? AND fp_balance>=1").bind(pid));
+        await env.DB.batch(batch);
         return json({success:true,matched:true,session_id:sid,custom_duration:cfg.customDuration||0});
       }
       await env.DB.prepare("INSERT OR REPLACE INTO matching_queue(user_id,english_level,joined_at)VALUES(?,?,datetime('now'))").bind(user_id,english_level).run();
@@ -305,8 +343,9 @@ export default{
       const sess:any=await env.DB.prepare("SELECT * FROM sessions WHERE(user1_id=? OR user2_id=?)AND status='active' LIMIT 1").bind(uid,uid).first();
       if(!sess)return json({active_session:false});
       const pid=sess.user1_id===uid?sess.user2_id:sess.user1_id;
-      const partner=await env.DB.prepare('SELECT id,username,nickname,english_level,avatar_url,country,native_language FROM users WHERE id=?').bind(pid).first();
+      const partner:any=await env.DB.prepare('SELECT id,username,nickname,english_level,avatar_url,country,native_language,created_at FROM users WHERE id=?').bind(pid).first();
       const cfg=await getSettings(env.DB);
+      if(partner)partner.founding_member=isFoundingMember(partner.created_at,cfg.promoBadgeDays);
       return json({active_session:true,session:{...sess,partner,custom_duration:cfg.customDuration||0}});
     }
 
@@ -385,7 +424,7 @@ export default{
     if(p==='/api/admin/settings/update'&&req.method==='POST'){
       const{admin_id,key,value}=await req.json() as any;
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
-      const allowed=['matching_by_level','matching_diff_country','matching_diff_language','custom_call_duration'];
+      const allowed=['matching_by_level','matching_diff_country','matching_diff_language','custom_call_duration','promo_fp_free_days','promo_initial_rp','promo_badge_days'];
       if(!allowed.includes(key))return json({error:'Unknown setting'},400);
       await env.DB.prepare("INSERT INTO app_settings(key,value,updated_by,updated_at)VALUES(?,?,?,datetime('now'))ON CONFLICT(key)DO UPDATE SET value=excluded.value,updated_by=excluded.updated_by,updated_at=excluded.updated_at").bind(key,value,admin_id).run();
       return json({success:true});
