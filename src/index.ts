@@ -335,6 +335,23 @@ export default{
     if(p==='/api/matching/leave'&&req.method==='POST'){
       const{user_id}=await req.json() as any;
       await env.DB.prepare('DELETE FROM matching_queue WHERE user_id=?').bind(user_id).run();
+      // Race condition: a match may have been created between the last poll and cancel.
+      // If an active session exists where the user never connected, end it and refund both users.
+      const sess:any=await env.DB.prepare("SELECT * FROM sessions WHERE(user1_id=? OR user2_id=?)AND status='active' AND connected_at IS NULL ORDER BY created_at DESC LIMIT 1").bind(user_id,user_id).first();
+      if(sess){
+        const dur=Math.floor((Date.now()-new Date(sess.created_at).getTime())/1000);
+        const cfg=await getSettings(env.DB);
+        const u1:any=await env.DB.prepare('SELECT created_at FROM users WHERE id=?').bind(sess.user1_id).first();
+        const u2:any=await env.DB.prepare('SELECT created_at FROM users WHERE id=?').bind(sess.user2_id).first();
+        const u1Free=cfg.promoFpFreeDays>0&&isFoundingMember(u1?.created_at,cfg.promoFpFreeDays);
+        const u2Free=cfg.promoFpFreeDays>0&&isFoundingMember(u2?.created_at,cfg.promoFpFreeDays);
+        const batch:any[]=[
+          env.DB.prepare("UPDATE sessions SET status='completed',ended_at=datetime('now'),duration=?,disconnect_reason='early_leave' WHERE id=?").bind(dur,sess.id),
+        ];
+        if(!u1Free)batch.push(env.DB.prepare('UPDATE users SET fp_balance=fp_balance+1 WHERE id=?').bind(sess.user1_id));
+        if(!u2Free)batch.push(env.DB.prepare('UPDATE users SET fp_balance=fp_balance+1 WHERE id=?').bind(sess.user2_id));
+        await env.DB.batch(batch);
+      }
       return json({success:true});
     }
 
