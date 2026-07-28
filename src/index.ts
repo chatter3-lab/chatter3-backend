@@ -609,7 +609,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         safe(env.DB.prepare('SELECT SUM(d1_writes) as c FROM daily_usage')),
         safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE created_at>=?").bind(today)),
         safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE created_at>=?").bind(monthStart)),
-        safe(env.DB.prepare("SELECT AVG(duration) as avg_dur FROM sessions WHERE status='completed' AND created_at>=DATE('now','-30 days')")),
+        safe(env.DB.prepare("SELECT AVG(MIN(COALESCE(duration,0),COALESCE(custom_duration,600))) as avg_dur FROM sessions WHERE status='completed' AND created_at>=DATE('now','-30 days')")),
       ]);
       // Estimate D1 row counts (each user = ~1 row, each session = ~1 row, etc.)
       const userCount=totalUsers?.c||0;const sessionCount=totalSessions?.c||0;
