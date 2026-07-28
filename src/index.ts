@@ -85,6 +85,10 @@ export default{
 
     // Migration: add founding_member_override column if missing
     try{await env.DB.prepare("ALTER TABLE users ADD COLUMN founding_member_override INTEGER DEFAULT 0").run();}catch{}
+    // Migration: usage tracking table
+    try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS daily_usage(day TEXT PRIMARY KEY,api_requests INTEGER DEFAULT 0,d1_reads INTEGER DEFAULT 0,d1_writes INTEGER DEFAULT 0,do_requests INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
+    // Track API request (fire-and-forget)
+    try{const day=todayUTC();await env.DB.prepare("INSERT INTO daily_usage(day,api_requests,d1_reads,d1_writes)VALUES(?,1,1,0)ON CONFLICT(day)DO UPDATE SET api_requests=api_requests+1,d1_reads=d1_reads+1").bind(day).run();}catch{}
 
     // ICE servers
     if(p==='/api/ice-servers'){
@@ -586,6 +590,33 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         fp_rp_stats:fpRpStats||{},
         retention_stats:retentionStats||{},
         report_stats:reportStats||{}
+      });
+    }
+
+    // Admin: usage / infrastructure stats
+    if(p==='/api/admin/usage'&&req.method==='POST'){
+      const{admin_id}=await req.json() as any;
+      if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      const today=todayUTC();const monthStart=today.slice(0,7)+'-01';
+      const safe=async(q)=>q.first().catch(()=>({}));
+      const safeAll=async(q)=>q.all().catch(()=>({results:[]}));
+      const[daily,weekly,monthly,totalUsers,totalSessions,totalD1Writes]=await Promise.all([
+        safe(env.DB.prepare('SELECT api_requests,d1_reads,d1_writes,do_requests FROM daily_usage WHERE day=?').bind(today)),
+        safe(env.DB.prepare("SELECT SUM(api_requests) as api_requests,SUM(d1_reads) as d1_reads,SUM(d1_writes) as d1_writes,SUM(do_requests) as do_requests FROM daily_usage WHERE day>=DATE('now','-7 days')")),
+        safe(env.DB.prepare("SELECT SUM(api_requests) as api_requests,SUM(d1_reads) as d1_reads,SUM(d1_writes) as d1_writes,SUM(do_requests) as do_requests FROM daily_usage WHERE day>=?").bind(monthStart)),
+        safe(env.DB.prepare('SELECT COUNT(*) as c FROM users')),
+        safe(env.DB.prepare('SELECT COUNT(*) as c FROM sessions')),
+        safe(env.DB.prepare('SELECT SUM(d1_writes) as c FROM daily_usage')),
+      ]);
+      // Estimate D1 row counts (each user = ~1 row, each session = ~1 row, etc.)
+      const userCount=totalUsers?.c||0;const sessionCount=totalSessions?.c||0;
+      const estimatedRows=userCount+sessionCount+(userCount*2)+(sessionCount*3);
+      return json({
+        success:true,
+        daily:{api_requests:daily?.api_requests||0,d1_reads:daily?.d1_reads||0,d1_writes:daily?.d1_writes||0,do_requests:daily?.do_requests||0},
+        weekly:{api_requests:weekly?.api_requests||0,d1_reads:weekly?.d1_reads||0,d1_writes:weekly?.d1_writes||0,do_requests:weekly?.do_requests||0},
+        monthly:{api_requests:monthly?.api_requests||0,d1_reads:monthly?.d1_reads||0,d1_writes:monthly?.d1_writes||0,do_requests:monthly?.do_requests||0},
+        estimates:{total_rows:estimatedRows,total_users:userCount,total_sessions:sessionCount,total_d1_writes_all_time:totalD1Writes?.c||0},
       });
     }
 
