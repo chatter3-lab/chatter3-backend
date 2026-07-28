@@ -85,6 +85,8 @@ export default{
 
     // Migration: add founding_member_override column if missing
     try{await env.DB.prepare("ALTER TABLE users ADD COLUMN founding_member_override INTEGER DEFAULT 0").run();}catch{}
+    // Migration: add used_relay column to sessions
+    try{await env.DB.prepare("ALTER TABLE sessions ADD COLUMN used_relay INTEGER DEFAULT 0").run();}catch{}
     // Migration: usage tracking table
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS daily_usage(day TEXT PRIMARY KEY,api_requests INTEGER DEFAULT 0,d1_reads INTEGER DEFAULT 0,d1_writes INTEGER DEFAULT 0,do_requests INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Track API request (fire-and-forget)
@@ -391,23 +393,23 @@ export default{
     }
 
     if(p==='/api/matching/end'&&req.method==='POST'){
-      const{session_id,user_id,reason}=await req.json() as any;
+      const{session_id,user_id,reason,used_relay}=await req.json() as any;
       const sess:any=await env.DB.prepare('SELECT * FROM sessions WHERE id=?').bind(session_id).first();
       if(sess&&sess.status==='active'){
         const dur=Math.floor((Date.now()-new Date(sess.created_at).getTime())/1000);
-        await env.DB.prepare("UPDATE sessions SET status='completed',ended_at=datetime('now'),duration=?,disconnect_reason=? WHERE id=?").bind(dur,reason||'hangup',session_id).run();
+        await env.DB.prepare("UPDATE sessions SET status='completed',ended_at=datetime('now'),duration=?,disconnect_reason=?,used_relay=COALESCE(used_relay,?) WHERE id=?").bind(dur,reason||'hangup',used_relay?1:0,session_id).run();
       }
       return json({success:true});
     }
 
     if(p==='/api/matching/rate'&&req.method==='POST'){
-      const{session_id,user_id,rating}=await req.json() as any;
+      const{session_id,user_id,rating,used_relay}=await req.json() as any;
       const sess:any=await env.DB.prepare('SELECT * FROM sessions WHERE id=?').bind(session_id).first();
       if(!sess)return json({success:false,error:'Session not found'});
       const isU1=sess.user1_id===user_id;
       const field=isU1?'user1_rating':'user2_rating';
       const dur=Math.floor((Date.now()-new Date(sess.created_at).getTime())/1000);
-      await env.DB.prepare(`UPDATE sessions SET ${field}=?,status='completed',duration=COALESCE(duration,?) WHERE id=?`).bind(rating,dur,session_id).run();
+      await env.DB.prepare(`UPDATE sessions SET ${field}=?,status='completed',duration=COALESCE(duration,?),used_relay=COALESCE(used_relay,?) WHERE id=?`).bind(rating,dur,used_relay?1:0,session_id).run();
       const updated:any=await env.DB.prepare('SELECT * FROM sessions WHERE id=?').bind(session_id).first();
       if(updated.user1_rating&&updated.user2_rating){
         const now=new Date().toISOString().replace('T',' ').slice(0,19);
@@ -607,7 +609,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const today=todayUTC();const monthStart=today.slice(0,7)+'-01';
       const safe=async(q)=>q.first().catch(()=>({}));
       const safeAll=async(q)=>q.all().catch(()=>({results:[]}));
-      const[daily,weekly,monthly,totalUsers,totalSessions,totalD1Writes,todaySessions,monthSessions,avgDuration]=await Promise.all([
+      const[daily,weekly,monthly,totalUsers,totalSessions,totalD1Writes,todaySessions,monthSessions,avgDuration,todayRelay,monthRelay,totalRelay]=await Promise.all([
         safe(env.DB.prepare('SELECT api_requests,d1_reads,d1_writes,do_requests FROM daily_usage WHERE day=?').bind(today)),
         safe(env.DB.prepare("SELECT SUM(api_requests) as api_requests,SUM(d1_reads) as d1_reads,SUM(d1_writes) as d1_writes,SUM(do_requests) as do_requests FROM daily_usage WHERE day>=DATE('now','-7 days')")),
         safe(env.DB.prepare("SELECT SUM(api_requests) as api_requests,SUM(d1_reads) as d1_reads,SUM(d1_writes) as d1_writes,SUM(do_requests) as do_requests FROM daily_usage WHERE day>=?").bind(monthStart)),
@@ -617,10 +619,19 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE created_at>=?").bind(today)),
         safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE created_at>=?").bind(monthStart)),
         safe(env.DB.prepare("SELECT AVG(MIN(COALESCE(duration,0),COALESCE(custom_duration,600))) as avg_dur FROM sessions WHERE status='completed' AND created_at>=DATE('now','-30 days')")),
+        safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE used_relay=1 AND created_at>=?").bind(today)),
+        safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE used_relay=1 AND created_at>=?").bind(monthStart)),
+        safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE used_relay=1")),
       ]);
       // Estimate D1 row counts (each user = ~1 row, each session = ~1 row, etc.)
       const userCount=totalUsers?.c||0;const sessionCount=totalSessions?.c||0;
       const estimatedRows=userCount+sessionCount+(userCount*2)+(sessionCount*3);
+      const todayRelayCount=todayRelay?.c||0;
+      const monthRelayCount=monthRelay?.c||0;
+      const totalRelayCount=totalRelay?.c||0;
+      const todayP2P=todaySessions?.c-todayRelayCount;
+      const monthP2P=monthSessions?.c-monthRelayCount;
+      const totalP2P=sessionCount-totalRelayCount;
       return json({
         success:true,
         daily:{api_requests:daily?.api_requests||0,d1_reads:daily?.d1_reads||0,d1_writes:daily?.d1_writes||0,do_requests:daily?.do_requests||0},
@@ -628,6 +639,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         monthly:{api_requests:monthly?.api_requests||0,d1_reads:monthly?.d1_reads||0,d1_writes:monthly?.d1_writes||0,do_requests:monthly?.do_requests||0},
         estimates:{total_rows:estimatedRows,total_users:userCount,total_sessions:sessionCount,total_d1_writes_all_time:totalD1Writes?.c||0},
         sessions:{today:todaySessions?.c||0,this_month:monthSessions?.c||0,avg_duration:avgDuration?.avg_dur||0},
+        relay:{today_relay:todayRelayCount,month_relay:monthRelayCount,total_relay:totalRelayCount,today_p2p:todayP2P>0?todayP2P:0,month_p2p:monthP2P>0?monthP2P:0,total_p2p:totalP2P>0?totalP2P:0},
       });
     }
 
