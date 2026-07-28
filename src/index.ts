@@ -90,10 +90,17 @@ export default{
     // Track API request (fire-and-forget)
     try{const day=todayUTC();await env.DB.prepare("INSERT INTO daily_usage(day,api_requests,d1_reads,d1_writes)VALUES(?,1,1,0)ON CONFLICT(day)DO UPDATE SET api_requests=api_requests+1,d1_reads=d1_reads+1").bind(day).run();}catch{}
 
-    // ICE servers
+    // ICE servers: Google STUN (free) + metered.ca TURN (relay only)
     if(p==='/api/ice-servers'){
-      try{const r=await fetch('https://chatter3.metered.live/api/v1/turn/credentials?apiKey=075477e7cb4cd90b70eb8fa70dbb4b7ab76a');return json({iceServers:await r.json()});}
-      catch{return json({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});}
+      try{
+        const r=await fetch('https://chatter3.metered.live/api/v1/turn/credentials?apiKey=075477e7cb4cd90b70eb8fa70dbb4b7ab76a');
+        const mt=await r.json();
+        // Add Google STUN first (free, faster discovery), keep metered TURN for relay
+        const iceServers=[{urls:'stun:stun.l.google.com:19302'},...(mt.iceServers||[])];
+        return json({iceServers});
+      }catch{
+        return json({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
+      }
     }
 
     // Online stats with by_level
