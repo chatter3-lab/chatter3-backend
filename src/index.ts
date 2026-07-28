@@ -53,8 +53,9 @@ async function getSettings(db:D1Database){
   };
 }
 
-// Check if a user is within the founding member promo window
-function isFoundingMember(created_at:any,promoBadgeDays:number){
+// Check if a user is a founding member (time-based OR admin override)
+function isFoundingMember(created_at:any,promoBadgeDays:number,override?:number){
+  if(override)return true;
   if(!promoBadgeDays||!created_at)return false;
   const age=Date.now()-new Date(created_at).getTime();
   return age<promoBadgeDays*86400000;
@@ -81,6 +82,9 @@ export default{
   async fetch(req:Request,env:Env):Promise<Response>{
     const url=new URL(req.url);const p=url.pathname;
     if(req.method==='OPTIONS')return new Response(null,{headers:cors});
+
+    // Migration: add founding_member_override column if missing
+    try{await env.DB.prepare("ALTER TABLE users ADD COLUMN founding_member_override INTEGER DEFAULT 0").run();}catch{}
 
     // ICE servers
     if(p==='/api/ice-servers'){
@@ -130,7 +134,7 @@ export default{
           await ensureDailyFP(env.DB,user.id);
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
         }
-        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays);
+        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
         return json({success:true,user});
       }catch{return json({success:false,error:'Invalid token'});}
     }
@@ -148,7 +152,7 @@ export default{
         }
         if(ref)await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
-        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays);
+        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
         return json({success:true,user});
       }catch{return json({success:false,error:'User already exists'});}
     }
@@ -161,7 +165,7 @@ export default{
       await ensureDailyFP(env.DB,user.id);
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
       const cfg=await getSettings(env.DB);
-      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
       return json({success:true,user:u});
     }
 
@@ -170,9 +174,9 @@ export default{
       const uid=p.split('/').pop();
       await ensureDailyFP(env.DB,uid as string);
       await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
-      const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance,created_at FROM users WHERE id=?').bind(uid).first();
+      const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance,created_at,founding_member_override FROM users WHERE id=?').bind(uid).first();
       const cfg=await getSettings(env.DB);
-      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.created_at,cfg.promoBadgeDays)});
+      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.created_at,cfg.promoBadgeDays,u?.founding_member_override)});
     }
 
     if(p==='/api/user/exchange-rp'&&req.method==='POST'){
@@ -193,7 +197,7 @@ export default{
       await env.DB.prepare('UPDATE users SET nickname=?,country=?,native_language=?,english_level=?,bio=?,avatar_url=? WHERE id=?').bind(nickname,country,native_language,english_level,bio,avatar_url,id).run();
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
       const cfg=await getSettings(env.DB);
-      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
       return json({success:true,user:u});
     }
 
@@ -209,7 +213,7 @@ export default{
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(uid).first();
       if(!u)return json({success:false,error:'User not found'});
       const cfg=await getSettings(env.DB);
-      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
       return json({success:true,user:u});
     }
 
@@ -360,9 +364,9 @@ export default{
       const sess:any=await env.DB.prepare("SELECT * FROM sessions WHERE(user1_id=? OR user2_id=?)AND status='active' LIMIT 1").bind(uid,uid).first();
       if(!sess)return json({active_session:false});
       const pid=sess.user1_id===uid?sess.user2_id:sess.user1_id;
-      const partner:any=await env.DB.prepare('SELECT id,username,nickname,english_level,avatar_url,country,native_language,created_at FROM users WHERE id=?').bind(pid).first();
+      const partner:any=await env.DB.prepare('SELECT id,username,nickname,english_level,avatar_url,country,native_language,created_at,founding_member_override FROM users WHERE id=?').bind(pid).first();
       const cfg=await getSettings(env.DB);
-      if(partner)partner.founding_member=isFoundingMember(partner.created_at,cfg.promoBadgeDays);
+      if(partner)partner.founding_member=isFoundingMember(partner.created_at,cfg.promoBadgeDays,partner.founding_member_override);
       return json({active_session:true,session:{...sess,partner,custom_duration:cfg.customDuration||0}});
     }
 
@@ -621,6 +625,17 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       return json({success:true});
     }
 
+    if(p.endsWith('/founding-member')&&req.method==='POST'){
+      const uid=p.split('/')[4];
+      const{admin_id}=await req.json() as any;
+      if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      const u:any=await env.DB.prepare('SELECT founding_member_override FROM users WHERE id=?').bind(uid).first();
+      if(!u)return json({error:'User not found'},404);
+      const newVal=u.founding_member_override?0:1;
+      await env.DB.prepare('UPDATE users SET founding_member_override=? WHERE id=?').bind(newVal,uid).run();
+      return json({success:true,founding_member_override:newVal});
+    }
+
     if(p==='/api/admin/reports'&&req.method==='POST'){
       const{admin_id,status}=await req.json() as any;
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
@@ -677,7 +692,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
       const[total,users]:any[]= await Promise.all([
         env.DB.prepare('SELECT COUNT(*) as c FROM users').first(),
-        env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,country,native_language,created_at FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(limit,offset).all(),
+        env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,country,native_language,created_at,founding_member_override FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(limit,offset).all(),
       ]);
       return json({success:true,users:users.results||[],total:total?.c||0});
     }
