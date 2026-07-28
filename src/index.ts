@@ -135,6 +135,7 @@ export default{
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
         }
         user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
+        user.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(user.created_at,cfg.promoFpFreeDays,user.founding_member_override);
         return json({success:true,user});
       }catch{return json({success:false,error:'Invalid token'});}
     }
@@ -153,6 +154,7 @@ export default{
         if(ref)await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
         user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
+        user.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(user.created_at,cfg.promoFpFreeDays,user.founding_member_override);
         return json({success:true,user});
       }catch{return json({success:false,error:'User already exists'});}
     }
@@ -166,6 +168,7 @@ export default{
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
       const cfg=await getSettings(env.DB);
       u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
+      u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);
       return json({success:true,user:u});
     }
 
@@ -176,7 +179,7 @@ export default{
       await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
       const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance,created_at,founding_member_override FROM users WHERE id=?').bind(uid).first();
       const cfg=await getSettings(env.DB);
-      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.created_at,cfg.promoBadgeDays,u?.founding_member_override)});
+      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.created_at,cfg.promoBadgeDays,u?.founding_member_override),in_free_period:cfg.promoFpFreeDays>0&&isFoundingMember(u?.created_at,cfg.promoFpFreeDays,u?.founding_member_override)});
     }
 
     if(p==='/api/user/exchange-rp'&&req.method==='POST'){
@@ -198,6 +201,7 @@ export default{
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
       const cfg=await getSettings(env.DB);
       u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
+      u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);
       return json({success:true,user:u});
     }
 
@@ -214,6 +218,7 @@ export default{
       if(!u)return json({success:false,error:'User not found'});
       const cfg=await getSettings(env.DB);
       u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
+      u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);
       return json({success:true,user:u});
     }
 
@@ -238,7 +243,7 @@ export default{
       const cfg=await getSettings(env.DB);
       const q=`%${query||''}%`;
       const users=await env.DB.prepare(`SELECT id,username,nickname,avatar_url,country,english_level,created_at,founding_member_override FROM users WHERE(username LIKE ? OR nickname LIKE ?)AND id!=? AND is_banned=0 LIMIT 20`).bind(q,q,user_id).all();
-      for(const u of (users.results||[]))u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
+      for(const u of (users.results||[])){u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);}
       return json({success:true,users:users.results});
     }
 
@@ -279,7 +284,7 @@ export default{
       const{user_id}=await req.json() as any;
       const cfg=await getSettings(env.DB);
       const friends=await env.DB.prepare(`SELECT u.id,u.username,u.nickname,u.avatar_url,u.country,u.english_level,u.created_at,u.founding_member_override FROM friends f JOIN users u ON f.friend_id=u.id WHERE f.user_id=? ORDER BY u.username ASC`).bind(user_id).all();
-      for(const u of (friends.results||[]))u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
+      for(const u of (friends.results||[])){u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);}
       const pending=await env.DB.prepare(`SELECT fr.id,fr.sender_id,fr.created_at,u.username,u.nickname,u.avatar_url FROM friend_requests fr JOIN users u ON fr.sender_id=u.id WHERE fr.receiver_id=? AND fr.status='pending'`).bind(user_id).all();
       const sent=await env.DB.prepare(`SELECT fr.id,fr.receiver_id,fr.status,u.username FROM friend_requests fr JOIN users u ON fr.receiver_id=u.id WHERE fr.sender_id=?`).bind(user_id).all();
       return json({success:true,friends:friends.results,pending_requests:pending.results,sent_requests:sent.results});
@@ -370,7 +375,7 @@ export default{
       const pid=sess.user1_id===uid?sess.user2_id:sess.user1_id;
       const partner:any=await env.DB.prepare('SELECT id,username,nickname,english_level,avatar_url,country,native_language,created_at,founding_member_override FROM users WHERE id=?').bind(pid).first();
       const cfg=await getSettings(env.DB);
-      if(partner)partner.founding_member=isFoundingMember(partner.created_at,cfg.promoBadgeDays,partner.founding_member_override);
+      if(partner){partner.founding_member=isFoundingMember(partner.created_at,cfg.promoBadgeDays,partner.founding_member_override);partner.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(partner.created_at,cfg.promoFpFreeDays,partner.founding_member_override);}
       return json({active_session:true,session:{...sess,partner,custom_duration:cfg.customDuration||0}});
     }
 
