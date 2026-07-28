@@ -600,13 +600,16 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const today=todayUTC();const monthStart=today.slice(0,7)+'-01';
       const safe=async(q)=>q.first().catch(()=>({}));
       const safeAll=async(q)=>q.all().catch(()=>({results:[]}));
-      const[daily,weekly,monthly,totalUsers,totalSessions,totalD1Writes]=await Promise.all([
+      const[daily,weekly,monthly,totalUsers,totalSessions,totalD1Writes,todaySessions,monthSessions,avgDuration]=await Promise.all([
         safe(env.DB.prepare('SELECT api_requests,d1_reads,d1_writes,do_requests FROM daily_usage WHERE day=?').bind(today)),
         safe(env.DB.prepare("SELECT SUM(api_requests) as api_requests,SUM(d1_reads) as d1_reads,SUM(d1_writes) as d1_writes,SUM(do_requests) as do_requests FROM daily_usage WHERE day>=DATE('now','-7 days')")),
         safe(env.DB.prepare("SELECT SUM(api_requests) as api_requests,SUM(d1_reads) as d1_reads,SUM(d1_writes) as d1_writes,SUM(do_requests) as do_requests FROM daily_usage WHERE day>=?").bind(monthStart)),
         safe(env.DB.prepare('SELECT COUNT(*) as c FROM users')),
         safe(env.DB.prepare('SELECT COUNT(*) as c FROM sessions')),
         safe(env.DB.prepare('SELECT SUM(d1_writes) as c FROM daily_usage')),
+        safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE created_at>=?").bind(today)),
+        safe(env.DB.prepare("SELECT COUNT(*) as c FROM sessions WHERE created_at>=?").bind(monthStart)),
+        safe(env.DB.prepare("SELECT AVG(duration) as avg_dur FROM sessions WHERE status='completed' AND created_at>=DATE('now','-30 days')")),
       ]);
       // Estimate D1 row counts (each user = ~1 row, each session = ~1 row, etc.)
       const userCount=totalUsers?.c||0;const sessionCount=totalSessions?.c||0;
@@ -617,6 +620,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         weekly:{api_requests:weekly?.api_requests||0,d1_reads:weekly?.d1_reads||0,d1_writes:weekly?.d1_writes||0,do_requests:weekly?.do_requests||0},
         monthly:{api_requests:monthly?.api_requests||0,d1_reads:monthly?.d1_reads||0,d1_writes:monthly?.d1_writes||0,do_requests:monthly?.do_requests||0},
         estimates:{total_rows:estimatedRows,total_users:userCount,total_sessions:sessionCount,total_d1_writes_all_time:totalD1Writes?.c||0},
+        sessions:{today:todaySessions?.c||0,this_month:monthSessions?.c||0,avg_duration:avgDuration?.avg_dur||0},
       });
     }
 
