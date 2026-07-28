@@ -235,8 +235,10 @@ export default{
     // ── FRIENDS ────────────────────────────────────────────────
     if(p==='/api/friends/search'&&req.method==='POST'){
       const{user_id,query}=await req.json() as any;
+      const cfg=await getSettings(env.DB);
       const q=`%${query||''}%`;
-      const users=await env.DB.prepare(`SELECT id,username,nickname,avatar_url,country,english_level FROM users WHERE(username LIKE ? OR nickname LIKE ?)AND id!=? AND is_banned=0 LIMIT 20`).bind(q,q,user_id).all();
+      const users=await env.DB.prepare(`SELECT id,username,nickname,avatar_url,country,english_level,created_at,founding_member_override FROM users WHERE(username LIKE ? OR nickname LIKE ?)AND id!=? AND is_banned=0 LIMIT 20`).bind(q,q,user_id).all();
+      for(const u of (users.results||[]))u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
       return json({success:true,users:users.results});
     }
 
@@ -275,7 +277,9 @@ export default{
 
     if(p==='/api/friends/list'&&req.method==='POST'){
       const{user_id}=await req.json() as any;
-      const friends=await env.DB.prepare(`SELECT u.id,u.username,u.nickname,u.avatar_url,u.country,u.english_level FROM friends f JOIN users u ON f.friend_id=u.id WHERE f.user_id=? ORDER BY u.username ASC`).bind(user_id).all();
+      const cfg=await getSettings(env.DB);
+      const friends=await env.DB.prepare(`SELECT u.id,u.username,u.nickname,u.avatar_url,u.country,u.english_level,u.created_at,u.founding_member_override FROM friends f JOIN users u ON f.friend_id=u.id WHERE f.user_id=? ORDER BY u.username ASC`).bind(user_id).all();
+      for(const u of (friends.results||[]))u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
       const pending=await env.DB.prepare(`SELECT fr.id,fr.sender_id,fr.created_at,u.username,u.nickname,u.avatar_url FROM friend_requests fr JOIN users u ON fr.sender_id=u.id WHERE fr.receiver_id=? AND fr.status='pending'`).bind(user_id).all();
       const sent=await env.DB.prepare(`SELECT fr.id,fr.receiver_id,fr.status,u.username FROM friend_requests fr JOIN users u ON fr.receiver_id=u.id WHERE fr.sender_id=?`).bind(user_id).all();
       return json({success:true,friends:friends.results,pending_requests:pending.results,sent_requests:sent.results});
