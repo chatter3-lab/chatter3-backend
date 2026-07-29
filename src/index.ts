@@ -89,6 +89,8 @@ export default{
     try{await env.DB.prepare("ALTER TABLE sessions ADD COLUMN used_relay INTEGER DEFAULT 0").run();}catch{}
     // Migration: usage tracking table
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS daily_usage(day TEXT PRIMARY KEY,api_requests INTEGER DEFAULT 0,d1_reads INTEGER DEFAULT 0,d1_writes INTEGER DEFAULT 0,do_requests INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
+    // Migration: feedback table
+    try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,category TEXT NOT NULL,message TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Track API request (fire-and-forget)
     try{const day=todayUTC();await env.DB.prepare("INSERT INTO daily_usage(day,api_requests,d1_reads,d1_writes)VALUES(?,1,1,0)ON CONFLICT(day)DO UPDATE SET api_requests=api_requests+1,d1_reads=d1_reads+1").bind(day).run();}catch{}
 
@@ -453,6 +455,32 @@ export default{
     if(p==='/api/admin/check'&&req.method==='POST'){
       const{user_id}=await req.json() as any;
       return json({is_admin:await requireAdmin(env.DB,user_id)});
+    }
+
+    // User feedback submission
+    if(p==='/api/feedback'&&req.method==='POST'){
+      const{user_id,category,message}=await req.json() as any;
+      if(!user_id||!category||!message)return json({error:'Missing fields'},400);
+      const user:any=await env.DB.prepare('SELECT id,username,email FROM users WHERE id=?').bind(user_id).first();
+      if(!user)return json({error:'User not found'},404);
+      const id=uuid();
+      const now=new Date().toISOString().replace('T',' ').slice(0,19);
+      await env.DB.prepare("INSERT INTO feedback(id,user_id,category,message,created_at)VALUES(?,?,?,?,?)").bind(id,user_id,category,message,now).run();
+      // Reward 0.5 RP per day (max 1 feedback reward per day)
+      const today=todayUTC();
+      const todayRewards:any=await env.DB.prepare("SELECT COUNT(*) as c FROM point_transactions WHERE user_id=? AND activity_type='feedback_reward' AND DATE(created_at)=?").bind(user_id,today).first();
+      let rpAwarded=0;
+      if((todayRewards?.c||0)<1){
+        rpAwarded=0.5;
+        await env.DB.prepare("UPDATE users SET rp_balance=rp_balance+0.5 WHERE id=?").bind(user_id).run();
+        await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,session_id,created_at)VALUES(?,?,0.5,'feedback_reward',NULL,?)").bind(uuid(),user_id,now).run();
+      }
+      // Send email to admins
+      const subject=`[Chatter3] Feedback — ${category}`;
+      const html=`<h2>New User Feedback</h2><p><b>From:</b> ${user.username} (${user.email})</p><p><b>Category:</b> ${category}</p><p><b>Message:</b></p><p>${message.replace(/\n/g,'<br/>')}</p><hr/><p><a href="${APP_URL}/admin">Admin Dashboard</a></p>`;
+      await sendEmail(env.RESEND_API_KEY,'dax@chatter3.com',subject,html);
+      await sendEmail(env.RESEND_API_KEY,'john@chatter3.com',subject,html);
+      return json({success:true,rp_awarded:rpAwarded});
     }
 
     // Admin: read settings
