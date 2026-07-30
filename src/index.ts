@@ -50,15 +50,41 @@ async function getSettings(db:D1Database){
     promoFpFreeDays:parseInt(m['promo_fp_free_days']||'0'),
     promoInitialRp:parseInt(m['promo_initial_rp']||'0'),
     promoBadgeDays:parseInt(m['promo_badge_days']||'0'),
+    promoFpStart:m['promo_fp_start']||'',
+    promoFpEnd:m['promo_fp_end']||'',
+    promoRpStart:m['promo_rp_start']||'',
+    promoRpEnd:m['promo_rp_end']||'',
+    promoBadgeStart:m['promo_badge_start']||'',
+    promoBadgeEnd:m['promo_badge_end']||'',
   };
+}
+// Check if a promotion is currently active based on its date range
+function isPromoActive(start?:string,end?:string){
+  const now=Date.now();
+  if(start&&new Date(start).getTime()>now)return false;
+  if(end&&new Date(end).getTime()<now)return false;
+  return true;
 }
 
 // Check if a user is a founding member (time-based OR admin override)
-function isFoundingMember(created_at:any,promoBadgeDays:number,override?:number){
+function isFoundingMember(created_at:any,promoBadgeDays:number,override?:number,start?:string,end?:string){
   if(override)return true;
   if(!promoBadgeDays||!created_at)return false;
+  // Check date range
+  const now=Date.now();
+  if(start&&new Date(start).getTime()>now)return false;
+  if(end&&new Date(end).getTime()<now)return false;
   const age=Date.now()-new Date(created_at).getTime();
   return age<promoBadgeDays*86400000;
+}
+// Check if user is in FP free period (with date range)
+function inFpFreePeriod(created_at:any,promoFpFreeDays:number,start?:string,end?:string){
+  if(!promoFpFreeDays||!created_at)return false;
+  const now=Date.now();
+  if(start&&new Date(start).getTime()>now)return false;
+  if(end&&new Date(end).getTime()<now)return false;
+  const age=Date.now()-new Date(created_at).getTime();
+  return age<promoFpFreeDays*86400000;
 }
 
 // ── Signaling DO ─────────────────────────────────────────────
@@ -130,7 +156,7 @@ export default{
         const email=pl.email,name=pl.name||email.split('@')[0],pic=pl.picture||'';
         const isAdmin=ADMIN_EMAILS.includes(email)?1:0;
         const cfg=await getSettings(env.DB);
-        const initRp=cfg.promoInitialRp||0;
+        const initRp=(cfg.promoInitialRp||0)&&isPromoActive(cfg.promoRpStart,cfg.promoRpEnd)?cfg.promoInitialRp:0;
         let user:any=await env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first();
         if(!user){
           const id=uuid();
@@ -149,8 +175,8 @@ export default{
           await ensureDailyFP(env.DB,user.id);
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
         }
-        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
-        user.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(user.created_at,cfg.promoFpFreeDays,user.founding_member_override);
+        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
+        user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
         return json({success:true,user});
       }catch{return json({success:false,error:'Invalid token'});}
     }
@@ -168,8 +194,8 @@ export default{
         }
         if(ref)await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
-        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
-        user.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(user.created_at,cfg.promoFpFreeDays,user.founding_member_override);
+        user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
+        user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
         return json({success:true,user});
       }catch{return json({success:false,error:'User already exists'});}
     }
@@ -182,8 +208,8 @@ export default{
       await ensureDailyFP(env.DB,user.id);
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
       const cfg=await getSettings(env.DB);
-      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
-      u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
+      u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
       return json({success:true,user:u});
     }
 
@@ -194,7 +220,7 @@ export default{
       await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
       const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance,created_at,founding_member_override FROM users WHERE id=?').bind(uid).first();
       const cfg=await getSettings(env.DB);
-      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.created_at,cfg.promoBadgeDays,u?.founding_member_override),in_free_period:cfg.promoFpFreeDays>0&&isFoundingMember(u?.created_at,cfg.promoFpFreeDays,u?.founding_member_override)});
+      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.created_at,cfg.promoBadgeDays,u?.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd),in_free_period:inFpFreePeriod(u?.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd)});
     }
 
     if(p==='/api/user/exchange-rp'&&req.method==='POST'){
@@ -215,8 +241,8 @@ export default{
       await env.DB.prepare('UPDATE users SET nickname=?,country=?,native_language=?,english_level=?,bio=?,avatar_url=? WHERE id=?').bind(nickname,country,native_language,english_level,bio,avatar_url,id).run();
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
       const cfg=await getSettings(env.DB);
-      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
-      u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
+      u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
       return json({success:true,user:u});
     }
 
@@ -232,8 +258,8 @@ export default{
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(uid).first();
       if(!u)return json({success:false,error:'User not found'});
       const cfg=await getSettings(env.DB);
-      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
-      u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);
+      u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
+      u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
       return json({success:true,user:u});
     }
 
@@ -258,7 +284,7 @@ export default{
       const cfg=await getSettings(env.DB);
       const q=`%${query||''}%`;
       const users=await env.DB.prepare(`SELECT id,username,nickname,avatar_url,country,english_level,created_at,founding_member_override FROM users WHERE(username LIKE ? OR nickname LIKE ?)AND id!=? AND is_banned=0 LIMIT 20`).bind(q,q,user_id).all();
-      for(const u of (users.results||[])){u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);}
+      for(const u of (users.results||[])){u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);}
       return json({success:true,users:users.results});
     }
 
@@ -299,7 +325,7 @@ export default{
       const{user_id}=await req.json() as any;
       const cfg=await getSettings(env.DB);
       const friends=await env.DB.prepare(`SELECT u.id,u.username,u.nickname,u.avatar_url,u.country,u.english_level,u.created_at,u.founding_member_override FROM friends f JOIN users u ON f.friend_id=u.id WHERE f.user_id=? ORDER BY u.username ASC`).bind(user_id).all();
-      for(const u of (friends.results||[])){u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);u.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(u.created_at,cfg.promoFpFreeDays,u.founding_member_override);}
+      for(const u of (friends.results||[])){u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);}
       const pending=await env.DB.prepare(`SELECT fr.id,fr.sender_id,fr.created_at,u.username,u.nickname,u.avatar_url FROM friend_requests fr JOIN users u ON fr.sender_id=u.id WHERE fr.receiver_id=? AND fr.status='pending'`).bind(user_id).all();
       const sent=await env.DB.prepare(`SELECT fr.id,fr.receiver_id,fr.status,u.username FROM friend_requests fr JOIN users u ON fr.receiver_id=u.id WHERE fr.sender_id=?`).bind(user_id).all();
       return json({success:true,friends:friends.results,pending_requests:pending.results,sent_requests:sent.results});
@@ -322,7 +348,7 @@ export default{
       const caller:any=await env.DB.prepare('SELECT fp_balance,country,native_language,is_banned,created_at FROM users WHERE id=?').bind(user_id).first();
       if(!caller)return json({success:false,error:'User not found'});
       if(caller.is_banned)return json({success:false,error:'Account suspended'});
-      const inFreePeriod=cfg.promoFpFreeDays>0&&isFoundingMember(caller.created_at,cfg.promoFpFreeDays);
+      const inFreePeriod=inFpFreePeriod(caller.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
       if(!inFreePeriod&&(caller.fp_balance||0)<1)return json({success:false,error:'insufficient_fp',fp:caller.fp_balance});
 
       const cCountry=(caller.country||country||'').trim().toLowerCase();
@@ -345,7 +371,7 @@ export default{
         const sid=uuid();const pid=match.user_id as string;
         // Deduct FP only if neither user is in free period
         const partner:any=await env.DB.prepare('SELECT created_at FROM users WHERE id=?').bind(pid).first();
-        const partnerFree=cfg.promoFpFreeDays>0&&isFoundingMember(partner?.created_at,cfg.promoFpFreeDays);
+        const partnerFree=inFpFreePeriod(partner?.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
         const batch:any[]=[
           env.DB.prepare("INSERT INTO sessions(id,user1_id,user2_id,english_level,status,created_at)VALUES(?,?,?,?,'active',datetime('now'))").bind(sid,user_id,pid,english_level),
           env.DB.prepare('DELETE FROM matching_queue WHERE user_id=?').bind(pid),
@@ -371,8 +397,8 @@ export default{
         const cfg=await getSettings(env.DB);
         const u1:any=await env.DB.prepare('SELECT created_at FROM users WHERE id=?').bind(sess.user1_id).first();
         const u2:any=await env.DB.prepare('SELECT created_at FROM users WHERE id=?').bind(sess.user2_id).first();
-        const u1Free=cfg.promoFpFreeDays>0&&isFoundingMember(u1?.created_at,cfg.promoFpFreeDays);
-        const u2Free=cfg.promoFpFreeDays>0&&isFoundingMember(u2?.created_at,cfg.promoFpFreeDays);
+        const u1Free=inFpFreePeriod(u1?.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
+        const u2Free=inFpFreePeriod(u2?.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
         const batch:any[]=[
           env.DB.prepare("UPDATE sessions SET status='completed',ended_at=datetime('now'),duration=?,disconnect_reason='early_leave' WHERE id=?").bind(dur,sess.id),
         ];
@@ -390,7 +416,7 @@ export default{
       const pid=sess.user1_id===uid?sess.user2_id:sess.user1_id;
       const partner:any=await env.DB.prepare('SELECT id,username,nickname,english_level,avatar_url,country,native_language,created_at,founding_member_override FROM users WHERE id=?').bind(pid).first();
       const cfg=await getSettings(env.DB);
-      if(partner){partner.founding_member=isFoundingMember(partner.created_at,cfg.promoBadgeDays,partner.founding_member_override);partner.in_free_period=cfg.promoFpFreeDays>0&&isFoundingMember(partner.created_at,cfg.promoFpFreeDays,partner.founding_member_override);}
+      if(partner){partner.founding_member=isFoundingMember(partner.created_at,cfg.promoBadgeDays,partner.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);partner.in_free_period=inFpFreePeriod(partner.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);}
       return json({active_session:true,session:{...sess,partner,custom_duration:cfg.customDuration||0}});
     }
 
@@ -495,7 +521,7 @@ export default{
     if(p==='/api/admin/settings/update'&&req.method==='POST'){
       const{admin_id,key,value}=await req.json() as any;
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
-      const allowed=['matching_by_level','matching_diff_country','matching_diff_language','custom_call_duration','promo_fp_free_days','promo_initial_rp','promo_badge_days'];
+      const allowed=['matching_by_level','matching_diff_country','matching_diff_language','custom_call_duration','promo_fp_free_days','promo_initial_rp','promo_badge_days','promo_fp_start','promo_fp_end','promo_rp_start','promo_rp_end','promo_badge_start','promo_badge_end'];
       if(!allowed.includes(key))return json({error:'Unknown setting'},400);
       await env.DB.prepare("INSERT INTO app_settings(key,value,updated_by,updated_at)VALUES(?,?,?,datetime('now'))ON CONFLICT(key)DO UPDATE SET value=excluded.value,updated_by=excluded.updated_by,updated_at=excluded.updated_at").bind(key,value,admin_id).run();
       return json({success:true});
