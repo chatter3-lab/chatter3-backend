@@ -866,10 +866,12 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
     if(p==='/api/admin/users/all'&&req.method==='POST'){
       const{admin_id,offset=0,limit=50}=await req.json() as any;
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      const cfg=await getSettings(env.DB);
       const[total,users]:any[]= await Promise.all([
         env.DB.prepare('SELECT COUNT(*) as c FROM users').first(),
         env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,country,native_language,created_at,founding_member_override FROM users ORDER BY created_at DESC LIMIT ? OFFSET ?').bind(limit,offset).all(),
       ]);
+      for(const u of (users.results||[]))u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);
       return json({success:true,users:users.results||[],total:total?.c||0});
     }
 
