@@ -810,13 +810,14 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       if(!u)return json({error:'User not found'},404);
       if(u.is_admin)return json({error:'Cannot delete admin users'},400);
       await env.DB.prepare('DELETE FROM matching_queue WHERE user_id=?').bind(uid).run();
-      await env.DB.prepare('DELETE FROM point_transactions WHERE user_id=?').bind(uid).run();
-      await env.DB.prepare('DELETE FROM connection_events WHERE user_id=?').bind(uid).run();
       await env.DB.prepare('DELETE FROM user_blocks WHERE blocker_id=? OR blocked_id=?').bind(uid,uid).run();
       await env.DB.prepare('DELETE FROM user_reports WHERE reporter_id=? OR reported_id=?').bind(uid,uid).run();
       await env.DB.prepare('DELETE FROM friend_requests WHERE sender_id=? OR receiver_id=?').bind(uid,uid).run();
       await env.DB.prepare('DELETE FROM friends WHERE user_id=? OR friend_id=?').bind(uid,uid).run();
       await env.DB.prepare('DELETE FROM invites WHERE inviter_id=? OR invitee_id=?').bind(uid,uid).run();
+      await env.DB.prepare('DELETE FROM point_transactions WHERE user_id=? OR session_id IN(SELECT id FROM sessions WHERE user1_id=? OR user2_id=?)').bind(uid,uid,uid).run();
+      await env.DB.prepare('DELETE FROM connection_events WHERE user_id=? OR session_id IN(SELECT id FROM sessions WHERE user1_id=? OR user2_id=?)').bind(uid,uid,uid).run();
+      await env.DB.prepare('DELETE FROM user_reports WHERE session_id IN(SELECT id FROM sessions WHERE user1_id=? OR user2_id=?)').bind(uid,uid).run();
       await env.DB.prepare('DELETE FROM sessions WHERE user1_id=? OR user2_id=?').bind(uid,uid).run();
       await env.DB.prepare('DELETE FROM users WHERE id=?').bind(uid).run();
       return json({success:true});
