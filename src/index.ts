@@ -753,6 +753,62 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       return json({success:true,founding_member_override:newVal});
     }
 
+    // Admin: create user
+    if(p==='/api/admin/user/create'&&req.method==='POST'){
+      const{admin_id,username,email,english_level,country,native_language}=await req.json() as any;
+      if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      if(!username||!email)return json({error:'Username and email required'},400);
+      const exists:any=await env.DB.prepare('SELECT id FROM users WHERE email=? OR username=?').bind(email,username).first();
+      if(exists)return json({error:'Email or username already exists'},409);
+      const id=uuid();
+      const cfg=await getSettings(env.DB);
+      const initRp=(cfg.promoInitialRp||0)&&isPromoActive(cfg.promoRpStart,cfg.promoRpEnd)?cfg.promoInitialRp:0;
+      await env.DB.prepare("INSERT INTO users(id,username,email,password_hash,english_level,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,'admin_created',?,1,?,?,?,datetime('now'))").bind(id,username,email,english_level||'beginner',todayUTC(),initRp,country||'',native_language||'').run();
+      if(initRp>0)await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,session_id,created_at)VALUES(?,?,?,'promo_registration_bonus',NULL,datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
+      const user=await env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,ban_reason,country,native_language,created_at FROM users WHERE id=?').bind(id).first();
+      return json({success:true,user});
+    }
+
+    // Admin: update user
+    if(p.match(/^\/api\/admin\/user\/[^/]+\/update$/)&&req.method==='POST'){
+      const uid=p.split('/')[4];
+      const{admin_id,username,email,english_level,country,native_language,nickname}=await req.json() as any;
+      if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      // Check uniqueness if changing username or email
+      if(username){
+        const dupe:any=await env.DB.prepare('SELECT id FROM users WHERE username=? AND id!=?').bind(username,uid).first();
+        if(dupe)return json({error:'Username already taken'},409);
+      }
+      if(email){
+        const dupe:any=await env.DB.prepare('SELECT id FROM users WHERE email=? AND id!=?').bind(email,uid).first();
+        if(dupe)return json({error:'Email already exists'},409);
+      }
+      const fields=[];const vals=[];
+      if(username){fields.push('username=?');vals.push(username);}
+      if(email){fields.push('email=?');vals.push(email);}
+      if(english_level){fields.push('english_level=?');vals.push(english_level);}
+      if(country!==undefined){fields.push('country=?');vals.push(country);}
+      if(native_language!==undefined){fields.push('native_language=?');vals.push(native_language);}
+      if(nickname!==undefined){fields.push('nickname=?');vals.push(nickname);}
+      if(fields.length===0)return json({error:'No fields to update'},400);
+      vals.push(uid);
+      await env.DB.prepare(`UPDATE users SET ${fields.join(',')} WHERE id=?`).bind(...vals).run();
+      const user=await env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,ban_reason,country,native_language,created_at FROM users WHERE id=?').bind(uid).first();
+      return json({success:true,user});
+    }
+
+    // Admin: delete user
+    if(p.match(/^\/api\/admin\/user\/[^/]+\/delete$/)&&req.method==='POST'){
+      const uid=p.split('/')[4];
+      const{admin_id}=await req.json() as any;
+      if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
+      const u:any=await env.DB.prepare('SELECT is_admin FROM users WHERE id=?').bind(uid).first();
+      if(!u)return json({error:'User not found'},404);
+      if(u.is_admin)return json({error:'Cannot delete admin users'},400);
+      await env.DB.prepare('DELETE FROM users WHERE id=?').bind(uid).run();
+      return json({success:true});
+    }
+
     if(p==='/api/admin/reports'&&req.method==='POST'){
       const{admin_id,status}=await req.json() as any;
       if(!await requireAdmin(env.DB,admin_id))return json({error:'Unauthorized'},403);
