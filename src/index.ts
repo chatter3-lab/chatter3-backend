@@ -6,6 +6,7 @@ interface Env {
   DB: D1Database;
   SIGNALING: DurableObjectNamespace;
   RESEND_API_KEY: string;
+  TURNSTILE_SECRET_KEY: string;
 }
 const cors={'Access-Control-Allow-Origin':'*','Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'Content-Type,Authorization'};
 const json=(d:any,s=200)=>Response.json(d,{status:s,headers:cors});
@@ -35,6 +36,47 @@ async function sendEmail(key:string,to:string,subject:string,html:string){
 async function requireAdmin(db:D1Database,uid:string){
   const u:any=await db.prepare('SELECT is_admin FROM users WHERE id=? AND is_admin=1').bind(uid).first();
   return !!u;
+}
+
+// ── Password hashing (PBKDF2 via Web Crypto) ───────────────
+async function hashPassword(password:string):Promise<string>{
+  const salt=crypto.getRandomValues(new Uint8Array(16));
+  const enc=new TextEncoder();
+  const key=await crypto.subtle.importKey('raw',enc.encode(password),{name:'PBKDF2'},false,['deriveBits']);
+  const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations:100000,hash:'SHA-256'},key,256);
+  const hash=new Uint8Array(bits);
+  const toB64=(b:Uint8Array)=>btoa(String.fromCharCode(...b));
+  return `pbkdf2$100000$${toB64(salt)}$${toB64(hash)}`;
+}
+async function verifyPassword(password:string,stored:string):Promise<boolean>{
+  if(!stored||!stored.startsWith('pbkdf2$'))return false;
+  const parts=stored.split('$');
+  if(parts.length!==4)return false;
+  const [,iterStr,b64salt,b64hash]=parts;
+  const iter=parseInt(iterStr);
+  const salt=Uint8Array.from(atob(b64salt),c=>c.charCodeAt(0));
+  const enc=new TextEncoder();
+  const key=await crypto.subtle.importKey('raw',enc.encode(password),{name:'PBKDF2'},false,['deriveBits']);
+  const bits=await crypto.subtle.deriveBits({name:'PBKDF2',salt,iterations:iter,hash:'SHA-256'},key,256);
+  const hash=new Uint8Array(bits);
+  const toB64=(b:Uint8Array)=>btoa(String.fromCharCode(...b));
+  return toB64(hash)===b64hash;
+}
+function isLegacyPassword(hash:string):boolean{
+  return !hash||hash==='email_user'||hash==='google_oauth_user'||hash==='admin_created'||!hash.startsWith('pbkdf2$');
+}
+
+// ── Turnstile verification ────────────────────────────────
+async function verifyTurnstile(token:string,secretKey:string,ip?:string):Promise<boolean>{
+  if(!secretKey)return true;
+  if(!token)return false;
+  const body=new URLSearchParams({secret:secretKey,response:token});
+  if(ip)body.append('remoteip',ip);
+  try{
+    const r=await fetch('https://challenges.cloudflare.com/turnstile/v0/siteverify',{method:'POST',body});
+    const d=await r.json() as any;
+    return d.success===true;
+  }catch{return false;}
 }
 
 // Read all app settings as a typed object
@@ -166,6 +208,7 @@ export default{
         }
         user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
         user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays);user.is_new_member=isNewMember(user.created_at,cfg.newMemberDays);
+        user.has_password=!isLegacyPassword(user.password_hash);
         // Notify admins of new registration
         if(!user.founding_member_override&&initRp>0){
           const html=`<h2>New User Registration</h2><p><b>Username:</b> ${name}</p><p><b>Email:</b> ${email}</p><p><b>Method:</b> Google OAuth</p><p><b>RP Bonus:</b> ${initRp}</p><hr/><p><a href="${APP_URL}/admin">Admin Dashboard</a></p>`;
@@ -177,12 +220,17 @@ export default{
     }
 
     if(p==='/api/auth/register'&&req.method==='POST'){
-      const{email,username,english_level,country,native_language,ref}=await req.json() as any;
+      const{email,username,password,english_level,country,native_language,ref,turnstileToken}=await req.json() as any;
+      if(!email||!username||!password)return json({success:false,error:'Email, username, and password are required'});
+      if(password.length<6)return json({success:false,error:'Password must be at least 6 characters'});
+      const ip=req.headers.get('CF-Connecting-IP')||'';
+      if(!await verifyTurnstile(turnstileToken,env.TURNSTILE_SECRET_KEY,ip))return json({success:false,error:'Robot verification failed. Please try again.'});
       const id=uuid();
       const cfg=await getSettings(env.DB);
       const initRp=cfg.promoInitialRp||0;
+      const passwordHash=await hashPassword(password);
       try{
-        await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,'email_user',?,0,?,?,0,?,?,datetime('now'))`).bind(id,username,email,english_level||'beginner',DAILY_FP,todayUTC(),country||'',native_language||'').run();
+        await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,?,?,0,?,?,0,?,?,datetime('now'))`).bind(id,username,email,passwordHash,english_level||'beginner',DAILY_FP,todayUTC(),country||'',native_language||'').run();
         if(initRp>0){
           await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
           await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
@@ -191,25 +239,54 @@ export default{
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
         user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
         user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays);user.is_new_member=isNewMember(user.created_at,cfg.newMemberDays);
+        user.has_password=!isLegacyPassword(user.password_hash);
         // Notify admins of new registration
         const html=`<h2>New User Registration</h2><p><b>Username:</b> ${username}</p><p><b>Email:</b> ${email}</p><p><b>Method:</b> Email Signup</p><p><b>Level:</b> ${english_level||'beginner'}</p><p><b>RP Bonus:</b> ${initRp}</p><hr/><p><a href="${APP_URL}/admin">Admin Dashboard</a></p>`;
         await sendEmail(env.RESEND_API_KEY,'dax@chatter3.com','[Chatter3] New User Registration',html);
         await sendEmail(env.RESEND_API_KEY,'john@chatter3.com','[Chatter3] New User Registration',html);
+        // Welcome email to new user
+        const welcomeHtml=`<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#4f46e5">Welcome to Chatter3! 🎉</h2><p>Hi <b>${username}</b>,</p><p>Your account is set up and ready to go. Here's how to get started:</p><ul><li><b>Free Practice (FP)</b> — You get <b>${DAILY_FP} FP</b> daily for 1-on-1 video calls</li><li><b>Reward Points (RP)</b> — Earn RP for completing calls and practicing with partners</li><li><b>Find a Partner</b> — Head to the dashboard and hit "Find Partner" to start</li></ul><p>Practice a little every day and you'll see real improvement fast.</p><p style="margin-top:24px"><a href="${APP_URL}" style="background:#4f46e5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold">Start Practicing →</a></p><p style="color:#9ca3af;font-size:12px;margin-top:30px">If you didn't create this account, you can safely ignore this email.</p></div>`;
+        await sendEmail(env.RESEND_API_KEY,email,'Welcome to Chatter3!',welcomeHtml);
         return json({success:true,user});
       }catch{return json({success:false,error:'User already exists'});}
     }
 
     if(p==='/api/auth/login'&&req.method==='POST'){
-      const{email}=await req.json() as any;
+      const{email,password,turnstileToken}=await req.json() as any;
+      if(!email)return json({success:false,error:'Email is required'});
+      const ip=req.headers.get('CF-Connecting-IP')||'';
+      if(!await verifyTurnstile(turnstileToken,env.TURNSTILE_SECRET_KEY,ip))return json({success:false,error:'Robot verification failed. Please try again.'});
       const user:any=await env.DB.prepare('SELECT * FROM users WHERE email=?').bind(email).first();
       if(!user)return json({success:false,error:'User not found'});
       if(user.is_banned)return json({success:false,error:'Account suspended. Contact support.'});
+      // Password check (skip for legacy users without proper hash)
+      if(!isLegacyPassword(user.password_hash)){
+        if(!password)return json({success:false,error:'Password is required'});
+        if(!await verifyPassword(password,user.password_hash))return json({success:false,error:'Invalid password'});
+      }
       await ensureDailyFP(env.DB,user.id);
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
       const cfg=await getSettings(env.DB);
       u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
       u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);
+      u.has_password=!isLegacyPassword(u.password_hash);
       return json({success:true,user:u});
+    }
+
+    // ── CHANGE PASSWORD ──────────────────────────────────────
+    if(p==='/api/auth/change-password'&&req.method==='POST'){
+      const{user_id,current_password,new_password}=await req.json() as any;
+      if(!user_id||!new_password)return json({success:false,error:'User ID and new password are required'});
+      if(new_password.length<6)return json({success:false,error:'New password must be at least 6 characters'});
+      const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user_id).first();
+      if(!user)return json({success:false,error:'User not found'});
+      if(!isLegacyPassword(user.password_hash)){
+        if(!current_password)return json({success:false,error:'Current password is required'});
+        if(!await verifyPassword(current_password,user.password_hash))return json({success:false,error:'Current password is incorrect'});
+      }
+      const newHash=await hashPassword(new_password);
+      await env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(newHash,user_id).run();
+      return json({success:true,message:'Password updated'});
     }
 
     // ── USER ───────────────────────────────────────────────────
@@ -247,6 +324,7 @@ export default{
       const cfg=await getSettings(env.DB);
       u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override);
       u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);
+      u.has_password=!isLegacyPassword(u.password_hash);
       return json({success:true,user:u});
     }
 
