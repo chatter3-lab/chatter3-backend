@@ -177,6 +177,12 @@ export default{
         }
         user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
         user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
+        // Notify admins of new registration
+        if(!user.founding_member_override&&initRp>0){
+          const html=`<h2>New User Registration</h2><p><b>Username:</b> ${name}</p><p><b>Email:</b> ${email}</p><p><b>Method:</b> Google OAuth</p><p><b>RP Bonus:</b> ${initRp}</p><hr/><p><a href="${APP_URL}/admin">Admin Dashboard</a></p>`;
+          await sendEmail(env.RESEND_API_KEY,'dax@chatter3.com','[Chatter3] New User Registration',html);
+          await sendEmail(env.RESEND_API_KEY,'john@chatter3.com','[Chatter3] New User Registration',html);
+        }
         return json({success:true,user});
       }catch{return json({success:false,error:'Invalid token'});}
     }
@@ -185,7 +191,7 @@ export default{
       const{email,username,english_level,country,native_language,ref}=await req.json() as any;
       const id=uuid();
       const cfg=await getSettings(env.DB);
-      const initRp=cfg.promoInitialRp||0;
+      const initRp=(cfg.promoInitialRp||0)&&isPromoActive(cfg.promoRpStart,cfg.promoRpEnd)?cfg.promoInitialRp:0;
       try{
         await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,'email_user',?,0,?,?,0,?,?,datetime('now'))`).bind(id,username,email,english_level||'beginner',DAILY_FP,todayUTC(),country||'',native_language||'').run();
         if(initRp>0){
@@ -196,6 +202,10 @@ export default{
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
         user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
         user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays,cfg.promoFpStart,cfg.promoFpEnd);
+        // Notify admins of new registration
+        const html=`<h2>New User Registration</h2><p><b>Username:</b> ${username}</p><p><b>Email:</b> ${email}</p><p><b>Method:</b> Email Signup</p><p><b>Level:</b> ${english_level||'beginner'}</p><p><b>RP Bonus:</b> ${initRp}</p><hr/><p><a href="${APP_URL}/admin">Admin Dashboard</a></p>`;
+        await sendEmail(env.RESEND_API_KEY,'dax@chatter3.com','[Chatter3] New User Registration',html);
+        await sendEmail(env.RESEND_API_KEY,'john@chatter3.com','[Chatter3] New User Registration',html);
         return json({success:true,user});
       }catch{return json({success:false,error:'User already exists'});}
     }
@@ -237,8 +247,13 @@ export default{
     }
 
     if(p==='/api/user/update'&&req.method==='POST'){
-      const{id,nickname,country,native_language,english_level,bio,avatar_url}=await req.json() as any;
-      await env.DB.prepare('UPDATE users SET nickname=?,country=?,native_language=?,english_level=?,bio=?,avatar_url=? WHERE id=?').bind(nickname,country,native_language,english_level,bio,avatar_url,id).run();
+      const{id,username,nickname,country,native_language,english_level,bio,avatar_url}=await req.json() as any;
+      // If username is provided, check uniqueness and update it
+      if(username){
+        const dupe:any=await env.DB.prepare('SELECT id FROM users WHERE username=? AND id!=?').bind(username,id).first();
+        if(!dupe)await env.DB.prepare('UPDATE users SET username=? WHERE id=?').bind(username,id).run();
+      }
+      await env.DB.prepare('UPDATE users SET nickname=?,country=?,native_language=?,english_level=?,bio=?,avatar_url=? WHERE id=?').bind(nickname||username,country,native_language,english_level,bio,avatar_url,id).run();
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
       const cfg=await getSettings(env.DB);
       u.founding_member=isFoundingMember(u.created_at,cfg.promoBadgeDays,u.founding_member_override,cfg.promoBadgeStart,cfg.promoBadgeEnd);
