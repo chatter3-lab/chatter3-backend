@@ -808,7 +808,14 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const u:any=await env.DB.prepare('SELECT is_admin FROM users WHERE id=?').bind(uid).first();
       if(!u)return json({error:'User not found'},404);
       if(u.is_admin)return json({error:'Cannot delete admin users'},400);
-      await env.DB.prepare('DELETE FROM users WHERE id=?').bind(uid).run();
+      const batch:any[]=[
+        env.DB.prepare('DELETE FROM users WHERE id=?').bind(uid),
+        env.DB.prepare('DELETE FROM matching_queue WHERE user_id=?').bind(uid),
+        env.DB.prepare("UPDATE sessions SET status='completed',ended_at=datetime('now'),disconnect_reason='user_deleted' WHERE(user1_id=? OR user2_id=?)AND status='active'").bind(uid,uid),
+        env.DB.prepare('DELETE FROM user_blocks WHERE blocker_id=? OR blocked_id=?').bind(uid,uid),
+        env.DB.prepare('DELETE FROM user_reports WHERE reporter_id=? OR reported_id=?').bind(uid,uid),
+      ];
+      await env.DB.batch(batch);
       return json({success:true});
     }
 
