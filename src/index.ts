@@ -362,7 +362,7 @@ export default{
       // Build WHERE clauses based on settings
       let strictQ=`SELECT mq.user_id FROM matching_queue mq JOIN users u ON mq.user_id=u.id WHERE u.is_banned=0 AND mq.user_id!=?`;
       const strictB:any[]=[user_id];
-      if(cfg.matchByLevel){strictQ+=` AND mq.english_level=?`;strictB.push(english_level);}
+      if(cfg.matchByLevel&&!cfg.mvpMode){strictQ+=` AND mq.english_level=?`;strictB.push(english_level);}
       if(cfg.matchDiffCountry&&cCountry){strictQ+=` AND (?='' OR LOWER(COALESCE(u.country,''))!=?)`;strictB.push(cCountry,cCountry);}
       if(cfg.matchDiffLang&&cLang){strictQ+=` AND (?='' OR LOWER(COALESCE(u.native_language,''))!=?)`;strictB.push(cLang,cLang);}
       strictQ+=` AND mq.user_id NOT IN(SELECT blocked_id FROM user_blocks WHERE blocker_id=? UNION SELECT blocker_id FROM user_blocks WHERE blocked_id=?) AND mq.user_id NOT IN(SELECT user1_id FROM sessions WHERE status='active' UNION SELECT user2_id FROM sessions WHERE status='active') ORDER BY mq.joined_at ASC LIMIT 1`;
