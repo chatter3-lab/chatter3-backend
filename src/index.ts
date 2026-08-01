@@ -179,6 +179,8 @@ async function getSettings(db:D1Database){
     promoBadgeDays:parseInt(m['promo_badge_days']||'0'),
     newMemberDays:parseInt(m['new_member_days']||'30'),
     mvpMode:(m['mvp_mode']??'')==='true',
+    maintenanceMode:(m['maintenance_mode']??'')==='true',
+    maintenanceMessage:m['maintenance_message']||'We are currently performing maintenance. Please check back later.',
   };
 }
 
@@ -249,6 +251,12 @@ export default{
       }catch{
         return json({iceServers:[{urls:'stun:stun.l.google.com:19302'}]});
       }
+    }
+
+    // Public status endpoint (maintenance mode check)
+    if(p==='/api/status'){
+      const cfg=await getSettings(env.DB);
+      return json({maintenance:cfg.maintenanceMode,maintenanceMessage:cfg.maintenanceMessage});
     }
 
     // Online stats with by_level
@@ -759,7 +767,7 @@ export default{
       if(auth instanceof Response)return auth;
       if(!auth.isAdmin)return json({error:'Unauthorized'},403);
       const{key,value}=await req.json() as any;
-      const allowed=['matching_by_level','matching_diff_country','matching_diff_language','custom_call_duration','promo_fp_free_days','promo_initial_rp','promo_badge_days','new_member_days','mvp_mode'];
+      const allowed=['matching_by_level','matching_diff_country','matching_diff_language','custom_call_duration','promo_fp_free_days','promo_initial_rp','promo_badge_days','new_member_days','mvp_mode','maintenance_mode','maintenance_message'];
       if(!allowed.includes(key))return json({error:'Unknown setting'},400);
       await env.DB.prepare("INSERT INTO app_settings(key,value,updated_by,updated_at)VALUES(?,?,?,datetime('now'))ON CONFLICT(key)DO UPDATE SET value=excluded.value,updated_by=excluded.updated_by,updated_at=excluded.updated_at").bind(key,value,auth.userId).run();
       return json({success:true});
