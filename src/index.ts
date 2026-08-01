@@ -237,6 +237,8 @@ export default{
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS daily_usage(day TEXT PRIMARY KEY,api_requests INTEGER DEFAULT 0,d1_reads INTEGER DEFAULT 0,d1_writes INTEGER DEFAULT 0,do_requests INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Migration: feedback table
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,category TEXT NOT NULL,message TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
+    // Migration: password reset tokens
+    try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS password_resets(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,token TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Track API request (fire-and-forget)
     try{const day=todayUTC();await env.DB.prepare("INSERT INTO daily_usage(day,api_requests,d1_reads,d1_writes)VALUES(?,1,1,0)ON CONFLICT(day)DO UPDATE SET api_requests=api_requests+1,d1_reads=d1_reads+1").bind(day).run();}catch{}
 
@@ -414,6 +416,39 @@ export default{
       const newHash=await hashPassword(new_password);
       await env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(newHash,auth.userId).run();
       return json({success:true,message:'Password updated'});
+    }
+
+    // ── FORGOT PASSWORD ─────────────────────────────────────
+    if(p==='/api/auth/forgot-password'&&req.method==='POST'){
+      const{email}=await req.json() as any;
+      if(!email)return json({success:false,error:'Email is required'});
+      const user:any=await env.DB.prepare('SELECT id,email FROM users WHERE email=?').bind(email).first();
+      // Always return success to prevent email enumeration
+      if(!user||isLegacyPassword((await env.DB.prepare('SELECT password_hash FROM users WHERE id=?').bind(user.id).first())?.password_hash)){
+        return json({success:true,message:'If an account exists with that email, a reset link has been sent.'});
+      }
+      const token=uuid();
+      const expiresAt=new Date(Date.now()+3600000).toISOString().replace('T',' ').slice(0,19);
+      await env.DB.prepare('DELETE FROM password_resets WHERE user_id=?').bind(user.id).run();
+      await env.DB.prepare('INSERT INTO password_resets(id,user_id,token,expires_at)VALUES(?,?,?,?)').bind(uuid(),user.id,token,expiresAt).run();
+      const resetUrl=`${APP_URL}/reset-password?token=${token}`;
+      const html=`<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px"><h2 style="color:#4f46e5">Password Reset Request</h2><p>Hi,</p><p>We received a request to reset your password for your Chatter3 account.</p><p style="margin:24px 0"><a href="${resetUrl}" style="background:#4f46e5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:bold;display:inline-block">Reset Password</a></p><p style="color:#9ca3af;font-size:12px">This link expires in 1 hour. If you didn't request this, you can safely ignore this email.</p></div>`;
+      await sendEmail(env.RESEND_API_KEY,user.email,'Reset Your Chatter3 Password',html);
+      return json({success:true,message:'If an account exists with that email, a reset link has been sent.'});
+    }
+
+    // ── RESET PASSWORD ──────────────────────────────────────
+    if(p==='/api/auth/reset-password'&&req.method==='POST'){
+      const{token,new_password}=await req.json() as any;
+      if(!token||!new_password)return json({success:false,error:'Token and new password are required'});
+      if(new_password.length<6)return json({success:false,error:'Password must be at least 6 characters'});
+      const reset:any=await env.DB.prepare('SELECT * FROM password_resets WHERE token=?').bind(token).first();
+      if(!reset)return json({success:false,error:'Invalid or expired reset token'});
+      if(new Date(reset.expires_at)<new Date())return json({success:false,error:'Reset token has expired'});
+      const newHash=await hashPassword(new_password);
+      await env.DB.prepare('UPDATE users SET password_hash=? WHERE id=?').bind(newHash,reset.user_id).run();
+      await env.DB.prepare('DELETE FROM password_resets WHERE id=?').bind(reset.id).run();
+      return json({success:true,message:'Password updated successfully'});
     }
 
     // ── USER ───────────────────────────────────────────────────
