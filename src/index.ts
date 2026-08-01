@@ -608,6 +608,12 @@ export default{
       const{english_level,country,native_language}=await req.json() as any;
       const user_id=auth.userId;
       await ensureDailyFP(env.DB,user_id);
+      // Check for existing active session first (partner may have already matched us)
+      const existingSession:any=await env.DB.prepare("SELECT id FROM sessions WHERE (user1_id=? OR user2_id=?) AND status='active' LIMIT 1").bind(user_id,user_id).first();
+      if(existingSession){
+        const cfg=await getSettings(env.DB);
+        return json({success:true,matched:true,session_id:existingSession.id,custom_duration:cfg.mvpMode?5:(cfg.customDuration||0)});
+      }
       const cfg=await getSettings(env.DB);
       const caller:any=await env.DB.prepare('SELECT fp_balance,country,native_language,is_banned,created_at FROM users WHERE id=?').bind(user_id).first();
       if(!caller)return json({success:false,error:'User not found'});
