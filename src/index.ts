@@ -258,7 +258,7 @@ export default{
     // Public status endpoint (maintenance mode check)
     if(p==='/api/status'){
       const cfg=await getSettings(env.DB);
-      return json({maintenance:cfg.maintenanceMode,maintenanceMessage:cfg.maintenanceMessage,settings:{matching_by_level:cfg.matching_by_level}});
+      return json({maintenance:cfg.maintenanceMode,maintenanceMessage:cfg.maintenanceMessage,settings:{matching_by_level:cfg.matchByLevel?'true':'false'}});
     }
 
     // Online stats with by_level
