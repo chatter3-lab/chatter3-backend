@@ -185,11 +185,8 @@ async function getSettings(db:D1Database){
 }
 
 // Check if a user is a founding member (time-based OR admin override)
-function isFoundingMember(created_at:any,promoBadgeDays:number,override?:number){
-  if(override)return true;
-  if(!promoBadgeDays||!created_at)return false;
-  const age=Date.now()-new Date(created_at).getTime();
-  return age<promoBadgeDays*86400000;
+function isFoundingMember(_created_at:any,_promoBadgeDays:number,override?:number){
+  return !!override;
 }
 // Check if user is in FP free period
 function inFpFreePeriod(created_at:any,promoFpFreeDays:number){
