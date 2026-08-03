@@ -323,6 +323,10 @@ export default{
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
           if(ref){
             await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
+            await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(id).run().catch(()=>{});
+            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),id).run().catch(()=>{});
+            await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(ref).run().catch(()=>{});
+            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),ref).run().catch(()=>{});
           }
         }else{
           if(isAdmin)await env.DB.prepare('UPDATE users SET is_admin=1 WHERE id=?').bind(user.id).run();
@@ -361,7 +365,13 @@ export default{
           await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
           await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
         }
-        if(ref)await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
+        if(ref){
+          await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
+          await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(id).run().catch(()=>{});
+          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),id).run().catch(()=>{});
+          await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(ref).run().catch(()=>{});
+          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),ref).run().catch(()=>{});
+        }
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
         user.founding_member=isFoundingMember(user.created_at,cfg.promoBadgeDays,user.founding_member_override);
         user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays);user.is_new_member=isNewMember(user.created_at,cfg.newMemberDays);
