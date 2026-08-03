@@ -1239,6 +1239,26 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       return json({success:true,statuses});
     }
 
+    // Admin: referral stats
+    if(p==='/api/admin/referrals'&&req.method==='POST'){
+      const auth=await requireAuth(env,req);
+      if(auth instanceof Response)return auth;
+      if(!auth.isAdmin)return json({error:'Unauthorized'},403);
+      const[totalReferrals,totalRpGiven]:any[]=await Promise.all([
+        env.DB.prepare('SELECT COUNT(*) as c FROM invites WHERE used=1').first(),
+        env.DB.prepare("SELECT COALESCE(SUM(points),0) as total FROM point_transactions WHERE activity_type='referral_bonus'").first(),
+      ]);
+      const recent:any=await env.DB.prepare(`
+        SELECT pt.id,pt.user_id,pt.points,pt.created_at,u.username,u.nickname,u.email
+        FROM point_transactions pt
+        LEFT JOIN users u ON pt.user_id=u.id
+        WHERE pt.activity_type='referral_bonus'
+        ORDER BY pt.created_at DESC
+        LIMIT 100
+      `).all().catch(()=>({results:[]}));
+      return json({success:true,total_referrals:totalReferrals?.c||0,total_rp_given:totalRpGiven?.total||0,transactions:recent.results||[]});
+    }
+
     if(p==='/api/signal'){
       const sid=url.searchParams.get('sessionId');
       if(!sid)return new Response('Missing sessionId',{status:400});
