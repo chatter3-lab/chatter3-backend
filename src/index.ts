@@ -1242,7 +1242,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       if(auth instanceof Response)return auth;
       if(!auth.isAdmin)return json({error:'Unauthorized'},403);
       const[totalReferrals,totalRpGiven]:any[]=await Promise.all([
-        env.DB.prepare('SELECT COUNT(*) as c FROM invites WHERE used=1').first(),
+        env.DB.prepare("SELECT COUNT(DISTINCT user_id) as c FROM point_transactions WHERE activity_type='referral_bonus'").first(),
         env.DB.prepare("SELECT COALESCE(SUM(points),0) as total FROM point_transactions WHERE activity_type='referral_bonus'").first(),
       ]);
       const recent:any=await env.DB.prepare(`
