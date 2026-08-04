@@ -1246,14 +1246,15 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         env.DB.prepare("SELECT COALESCE(SUM(points),0) as total FROM point_transactions WHERE activity_type='referral_bonus'").first(),
       ]);
       const recent:any=await env.DB.prepare(`
-        SELECT i.id,i.created_at,
+        SELECT i.inviter_id,i.invitee_id,MAX(i.created_at) as created_at,
           u1.username as referrer_name,u1.nickname as referrer_nickname,u1.email as referrer_email,
           u2.username as invitee_name,u2.nickname as invitee_nickname,u2.email as invitee_email
         FROM invites i
         LEFT JOIN users u1 ON i.inviter_id=u1.id
         LEFT JOIN users u2 ON i.invitee_id=u2.id
         WHERE i.used=1 AND i.invitee_id IS NOT NULL
-        ORDER BY i.created_at DESC
+        GROUP BY i.inviter_id,i.invitee_id
+        ORDER BY created_at DESC
         LIMIT 100
       `).all().catch(()=>({results:[]}));
       return json({success:true,total_referrals:totalReferrals?.c||0,total_rp_given:totalRpGiven?.total||0,transactions:recent.results||[]});
