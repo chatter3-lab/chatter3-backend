@@ -224,10 +224,13 @@ export default{
     const url=new URL(req.url);const p=url.pathname;
     if(req.method==='OPTIONS')return new Response(null,{headers:cors});
 
-    // Migration: add founding_member_override column if missing
+    // Migration: founding_member_override column
     try{await env.DB.prepare("ALTER TABLE users ADD COLUMN founding_member_override INTEGER DEFAULT 0").run();}catch{}
-    // Migration: add used_relay column to sessions
+    // Migration: used_relay column to sessions
     try{await env.DB.prepare("ALTER TABLE sessions ADD COLUMN used_relay INTEGER DEFAULT 0").run();}catch{}
+    // Migration: streak tracking columns
+    try{await env.DB.prepare("ALTER TABLE users ADD COLUMN streak_count INTEGER DEFAULT 0").run();}catch{}
+    try{await env.DB.prepare("ALTER TABLE users ADD COLUMN last_call_date TEXT").run();}catch{}
     // Migration: ensure admin emails have is_admin=1
     try{for(const email of ADMIN_EMAILS){await env.DB.prepare("UPDATE users SET is_admin=1 WHERE email=? AND is_admin=0").bind(email).run();}}catch{}
     // Migration: usage tracking table
@@ -728,13 +731,33 @@ export default{
         const u1=updated.user1_id,u2=updated.user2_id;
         const u1rp=RP_PER_COMPLETION+(updated.user2_rating==='good'?RP_PER_GOOD:0);
         const u2rp=RP_PER_COMPLETION+(updated.user1_rating==='good'?RP_PER_GOOD:0);
+        // Update streaks for both users
+        const today=todayUTC();
+        const[u1Data,u2Data]:any[]=await Promise.all([
+          env.DB.prepare('SELECT streak_count,last_call_date FROM users WHERE id=?').bind(u1).first(),
+          env.DB.prepare('SELECT streak_count,last_call_date FROM users WHERE id=?').bind(u2).first(),
+        ]);
+        // Helper to calculate new streak
+        const calcStreak=(lastDate:any,curCount:any)=>{
+          if(!lastDate)return 1;
+          const last=new Date(lastDate+'T00:00:00Z');
+          const now2=new Date(today+'T00:00:00Z');
+          const diffDays=Math.floor((now2.getTime()-last.getTime())/86400000);
+          if(diffDays===0)return curCount||1;
+          if(diffDays===1)return(curCount||0)+1;
+          return 1;
+        };
+        const u1Streak=calcStreak(u1Data?.last_call_date,u1Data?.streak_count);
+        const u2Streak=calcStreak(u2Data?.last_call_date,u2Data?.streak_count);
         await env.DB.batch([
           env.DB.prepare('UPDATE users SET rp_balance=rp_balance+? WHERE id=?').bind(u1rp,u1),
           env.DB.prepare('UPDATE users SET rp_balance=rp_balance+? WHERE id=?').bind(u2rp,u2),
           env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,session_id,created_at)VALUES(?,?,?,'video_call_reward',?,?)").bind(uuid(),u1,u1rp,session_id,now),
           env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,session_id,created_at)VALUES(?,?,?,'video_call_reward',?,?)").bind(uuid(),u2,u2rp,session_id,now),
+          env.DB.prepare('UPDATE users SET streak_count=?,last_call_date=? WHERE id=?').bind(u1Streak,today,u1),
+          env.DB.prepare('UPDATE users SET streak_count=?,last_call_date=? WHERE id=?').bind(u2Streak,today,u2),
         ]);
-        return json({success:true,rp_awarded:isU1?u1rp:u2rp});
+        return json({success:true,rp_awarded:isU1?u1rp:u2rp,streak:isU1?u1Streak:u2Streak});
       }
       return json({success:true,message:'Rating saved. Waiting for partner.'});
     }
@@ -1258,6 +1281,34 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         LIMIT 100
       `).all().catch(()=>({results:[]}));
       return json({success:true,total_referrals:totalReferrals?.c||0,total_rp_given:totalRpGiven?.total||0,transactions:recent.results||[]});
+    }
+
+    // ── Leaderboard ──────────────────────────────────────────
+    if(p==='/api/leaderboard'){
+      const mode=url.searchParams.get('mode')||'all-time';
+      const dateFilter=mode==='weekly'?"AND s.created_at>=DATE('now','-7 days')":'';
+      const q=await env.DB.prepare(`
+        SELECT u.id,u.nickname,u.username,u.streak_count,
+          COALESCE(SUM(s.duration),0) as total_duration,
+          COUNT(s.id) as total_sessions
+        FROM users u
+        LEFT JOIN sessions s ON (s.user1_id=u.id OR s.user2_id=u.id)
+          AND s.status='completed' ${dateFilter}
+        GROUP BY u.id
+        HAVING total_sessions > 0
+        ORDER BY (total_duration/60 + total_sessions*5 + u.streak_count*2) DESC
+        LIMIT 10
+      `).all().catch(()=>({results:[]}));
+      const results=(q.results||[]).map((r,i)=>({
+        rank:i+1,
+        username:r.username,
+        nickname:r.nickname||r.username,
+        streak:r.streak_count||0,
+        totalDuration:r.total_duration||0,
+        totalSessions:r.total_sessions||0,
+        score:Math.round((r.total_duration||0)/60+(r.total_sessions||0)*5+(r.streak_count||0)*2)
+      }));
+      return json({success:true,mode,leaderboard:results});
     }
 
     if(p==='/api/signal'){
