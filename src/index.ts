@@ -184,13 +184,9 @@ async function getSettings(db:D1Database){
   };
 }
 
-// Check if a user is a founding member (first 100 users OR admin override)
-async function isFoundingMember(DB:any,userId:any,override?:number){
-  if(override)return true;
-  try{
-    const r=await DB.prepare('SELECT COUNT(*) as cnt FROM users WHERE created_at<(SELECT created_at FROM users WHERE id=?)').bind(userId).first();
-    return (r?.cnt??0)<100;
-  }catch{return false;}
+// Check if a user is a founding member (flag set at registration for first 100, or admin override)
+function isFoundingMember(override?:number){
+  return !!override;
 }
 // Check if user is in FP free period
 function inFpFreePeriod(created_at:any,promoFpFreeDays:number){
@@ -237,6 +233,8 @@ export default{
     try{await env.DB.prepare("ALTER TABLE users ADD COLUMN last_call_date TEXT").run();}catch{}
     // Migration: ensure admin emails have is_admin=1
     try{for(const email of ADMIN_EMAILS){await env.DB.prepare("UPDATE users SET is_admin=1 WHERE email=? AND is_admin=0").bind(email).run();}}catch{}
+    // Migration: auto-grant FM badge to first 100 users
+    try{await env.DB.prepare("UPDATE users SET founding_member_override=1 WHERE id IN (SELECT id FROM users ORDER BY created_at ASC LIMIT 100) AND founding_member_override=0").run();}catch{}
     // Migration: usage tracking table
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS daily_usage(day TEXT PRIMARY KEY,api_requests INTEGER DEFAULT 0,d1_reads INTEGER DEFAULT 0,d1_writes INTEGER DEFAULT 0,do_requests INTEGER DEFAULT 0,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Migration: feedback table
@@ -320,6 +318,8 @@ export default{
           isNewUser=true;
           const id=uuid();
           await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,is_admin,created_at,avatar_url,nickname)VALUES(?,?,?,'google_oauth_user','beginner',0,?,?,0,?,datetime('now'),?,?)`).bind(id,name,email,DAILY_FP,todayUTC(),isAdmin,pic,name).run();
+          const uc=await env.DB.prepare('SELECT COUNT(*) as c FROM users').first();
+          if((uc?.c??0)<=100)await env.DB.prepare('UPDATE users SET founding_member_override=1 WHERE id=?').bind(id).run().catch(()=>{});
           if(initRp>0){
             await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
             await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
@@ -337,7 +337,7 @@ export default{
           await ensureDailyFP(env.DB,user.id);
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
         }
-        user.founding_member=await isFoundingMember(env.DB,user.id,user.founding_member_override);
+        user.founding_member=isFoundingMember(user.founding_member_override);
         user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays);user.is_new_member=isNewMember(user.created_at,cfg.newMemberDays);
         user.has_password=!isLegacyPassword(user.password_hash);
         const token=await createSessionToken(env,user.id,!!user.is_admin);
@@ -365,6 +365,8 @@ export default{
       const passwordHash=await hashPassword(password);
       try{
         await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,?,?,0,?,?,0,?,?,datetime('now'))`).bind(id,username,email,passwordHash,english_level||'beginner',DAILY_FP,todayUTC(),country||'',native_language||'').run();
+        const uc=await env.DB.prepare('SELECT COUNT(*) as c FROM users').first();
+        if((uc?.c??0)<=100)await env.DB.prepare('UPDATE users SET founding_member_override=1 WHERE id=?').bind(id).run().catch(()=>{});
         if(initRp>0){
           await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
           await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
@@ -377,7 +379,7 @@ export default{
           await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),ref).run().catch(()=>{});
         }
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
-        user.founding_member=await isFoundingMember(env.DB,user.id,user.founding_member_override);
+        user.founding_member=isFoundingMember(user.founding_member_override);
         user.in_free_period=inFpFreePeriod(user.created_at,cfg.promoFpFreeDays);user.is_new_member=isNewMember(user.created_at,cfg.newMemberDays);
         user.has_password=!isLegacyPassword(user.password_hash);
         const token=await createSessionToken(env,user.id,false);
@@ -406,7 +408,7 @@ export default{
       await ensureDailyFP(env.DB,user.id);
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(user.id).first();
       const cfg=await getSettings(env.DB);
-      u.founding_member=await isFoundingMember(env.DB,u.id,u.founding_member_override);
+      u.founding_member=isFoundingMember(u.founding_member_override);
       u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);
       u.has_password=!isLegacyPassword(u.password_hash);
       const token=await createSessionToken(env,u.id,!!u.is_admin);
@@ -472,7 +474,7 @@ export default{
       await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
       const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance,created_at,founding_member_override FROM users WHERE id=?').bind(uid).first();
       const cfg=await getSettings(env.DB);
-      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:await isFoundingMember(env.DB,uid,u?.founding_member_override),in_free_period:inFpFreePeriod(u?.created_at,cfg.promoFpFreeDays),is_new_member:isNewMember(u?.created_at,cfg.newMemberDays)});
+      return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.founding_member_override),in_free_period:inFpFreePeriod(u?.created_at,cfg.promoFpFreeDays),is_new_member:isNewMember(u?.created_at,cfg.newMemberDays)});
     }
 
     if(p==='/api/user/exchange-rp'&&req.method==='POST'){
@@ -501,7 +503,7 @@ export default{
       await env.DB.prepare('UPDATE users SET nickname=?,country=?,native_language=?,english_level=?,bio=?,avatar_url=? WHERE id=?').bind(nickname||username,country,native_language,english_level,bio,avatar_url,auth.userId).run();
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(auth.userId).first();
       const cfg=await getSettings(env.DB);
-      u.founding_member=await isFoundingMember(env.DB,u.id,u.founding_member_override);
+      u.founding_member=isFoundingMember(u.founding_member_override);
       u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);
       u.has_password=!isLegacyPassword(u.password_hash);
       const sanitized=sanitizeUser(u);
@@ -521,7 +523,7 @@ export default{
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(uid).first();
       if(!u)return json({success:false,error:'User not found'});
       const cfg=await getSettings(env.DB);
-      u.founding_member=await isFoundingMember(env.DB,u.id,u.founding_member_override);
+      u.founding_member=isFoundingMember(u.founding_member_override);
       u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);
       u.has_password=!isLegacyPassword(u.password_hash);
       return json({success:true,user:sanitizeUser(u)});
@@ -552,7 +554,7 @@ export default{
       const cfg=await getSettings(env.DB);
       const q=`%${query||''}%`;
       const users=await env.DB.prepare(`SELECT id,username,nickname,avatar_url,country,english_level,created_at,founding_member_override FROM users WHERE(username LIKE ? OR nickname LIKE ?)AND id!=? AND is_banned=0 LIMIT 20`).bind(q,q,auth.userId).all();
-      for(const u of (users.results||[])){u.founding_member=await isFoundingMember(env.DB,u.id,u.founding_member_override);u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);}
+      for(const u of (users.results||[])){u.founding_member=isFoundingMember(u.founding_member_override);u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);}
       return json({success:true,users:users.results});
     }
 
@@ -598,7 +600,7 @@ export default{
       if(auth instanceof Response)return auth;
       const cfg=await getSettings(env.DB);
       const friends=await env.DB.prepare(`SELECT u.id,u.username,u.nickname,u.avatar_url,u.country,u.english_level,u.created_at,u.founding_member_override FROM friends f JOIN users u ON f.friend_id=u.id WHERE f.user_id=? ORDER BY u.username ASC`).bind(auth.userId).all();
-      for(const u of (friends.results||[])){u.founding_member=await isFoundingMember(env.DB,u.id,u.founding_member_override);u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);}
+      for(const u of (friends.results||[])){u.founding_member=isFoundingMember(u.founding_member_override);u.in_free_period=inFpFreePeriod(u.created_at,cfg.promoFpFreeDays);u.is_new_member=isNewMember(u.created_at,cfg.newMemberDays);}
       const pending=await env.DB.prepare(`SELECT fr.id,fr.sender_id,fr.created_at,u.username,u.nickname,u.avatar_url FROM friend_requests fr JOIN users u ON fr.sender_id=u.id WHERE fr.receiver_id=? AND fr.status='pending'`).bind(auth.userId).all();
       const sent=await env.DB.prepare(`SELECT fr.id,fr.receiver_id,fr.status,u.username FROM friend_requests fr JOIN users u ON fr.receiver_id=u.id WHERE fr.sender_id=?`).bind(auth.userId).all();
       return json({success:true,friends:friends.results,pending_requests:pending.results,sent_requests:sent.results});
@@ -702,7 +704,7 @@ export default{
       const pid=sess.user1_id===uid?sess.user2_id:sess.user1_id;
       const partner:any=await env.DB.prepare('SELECT id,username,nickname,english_level,avatar_url,country,native_language,created_at,founding_member_override FROM users WHERE id=?').bind(pid).first();
       const cfg=await getSettings(env.DB);
-      if(partner){partner.founding_member=await isFoundingMember(env.DB,partner.id,partner.founding_member_override);partner.in_free_period=inFpFreePeriod(partner.created_at,cfg.promoFpFreeDays);partner.is_new_member=isNewMember(partner.created_at,cfg.newMemberDays);}
+      if(partner){partner.founding_member=isFoundingMember(partner.founding_member_override);partner.in_free_period=inFpFreePeriod(partner.created_at,cfg.promoFpFreeDays);partner.is_new_member=isNewMember(partner.created_at,cfg.newMemberDays);}
       return json({active_session:true,session:{...sess,partner,custom_duration:cfg.mvpMode?5:(cfg.customDuration||0)}});
     }
 
