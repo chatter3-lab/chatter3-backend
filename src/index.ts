@@ -241,6 +241,8 @@ export default{
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS feedback(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,category TEXT NOT NULL,message TEXT NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Migration: password reset tokens
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS password_resets(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,token TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
+    // Migration: blog posts table
+    try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS blog_posts(id TEXT PRIMARY KEY,slug TEXT UNIQUE NOT NULL,title TEXT NOT NULL,excerpt TEXT,content TEXT NOT NULL,author_id TEXT,status TEXT DEFAULT 'draft',lang TEXT DEFAULT 'en',created_at DATETIME DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Track API request (fire-and-forget)
     try{const day=todayUTC();await env.DB.prepare("INSERT INTO daily_usage(day,api_requests,d1_reads,d1_writes)VALUES(?,1,1,0)ON CONFLICT(day)DO UPDATE SET api_requests=api_requests+1,d1_reads=d1_reads+1").bind(day).run();}catch{}
 
@@ -1287,6 +1289,49 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
         LIMIT 100
       `).all().catch(()=>({results:[]}));
       return json({success:true,total_referrals:totalReferrals?.c||0,total_rp_given:totalRpGiven?.total||0,transactions:recent.results||[]});
+    }
+
+    // ── Blog Posts (Admin CRUD) ─────────────────────────────────
+    if(p==='/api/admin/blog/list'&&req.method==='POST'){
+      const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
+      const posts=await env.DB.prepare('SELECT id,slug,title,excerpt,status,lang,created_at,updated_at FROM blog_posts ORDER BY created_at DESC').all();
+      return json({success:true,posts:posts.results||[]});
+    }
+    if(p==='/api/admin/blog/create'&&req.method==='POST'){
+      const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
+      const{slug,title,excerpt,content,status,lang}=await req.json() as any;
+      if(!slug||!title||!content)return json({success:false,error:'Slug, title, and content are required'});
+      const id=uuid();
+      await env.DB.prepare('INSERT INTO blog_posts(id,slug,title,excerpt,content,author_id,status,lang,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,datetime(\'now\'),datetime(\'now\'))').bind(id,slug,title,excerpt||'',content,auth.userId,status||'draft',lang||'en').run();
+      return json({success:true,id});
+    }
+    if(p==='/api/admin/blog/update'&&req.method==='POST'){
+      const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
+      const{id,slug,title,excerpt,content,status,lang}=await req.json() as any;
+      if(!id)return json({success:false,error:'Post ID required'});
+      await env.DB.prepare('UPDATE blog_posts SET slug=?,title=?,excerpt=?,content=?,status=?,lang=?,updated_at=datetime(\'now\') WHERE id=?').bind(slug,title,excerpt||'',content,status||'draft',lang||'en',id).run();
+      return json({success:true});
+    }
+    if(p==='/api/admin/blog/delete'&&req.method==='POST'){
+      const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
+      const{id}=await req.json() as any;
+      if(!id)return json({success:false,error:'Post ID required'});
+      await env.DB.prepare('DELETE FROM blog_posts WHERE id=?').bind(id).run();
+      return json({success:true});
+    }
+    // Public blog endpoints
+    if(p==='/api/blog/list'&&req.method==='GET'){
+      const lang=url.searchParams.get('lang')||'en';
+      const posts=await env.DB.prepare('SELECT id,slug,title,excerpt,status,lang,created_at,updated_at FROM blog_posts WHERE status=\'published\' AND lang=? ORDER BY created_at DESC').bind(lang).all();
+      const fallback=await env.DB.prepare('SELECT id,slug,title,excerpt,status,lang,created_at,updated_at FROM blog_posts WHERE status=\'published\' AND lang=\'en\' ORDER BY created_at DESC').all();
+      return json({success:true,posts:lang==='en'?(posts.results||[]):(posts.results||[]).length>0?posts.results:fallback.results||[]});
+    }
+    if(p==='/api/blog/post'&&req.method==='GET'){
+      const slug=url.searchParams.get('slug');
+      if(!slug)return json({success:false,error:'Slug required'});
+      const post=await env.DB.prepare('SELECT * FROM blog_posts WHERE slug=? AND status=\'published\'').bind(slug).first();
+      if(!post)return json({success:false,error:'Post not found'});
+      return json({success:true,post});
     }
 
     // ── Leaderboard ──────────────────────────────────────────
