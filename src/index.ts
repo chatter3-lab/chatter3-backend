@@ -1350,6 +1350,16 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       await env.DB.prepare('DELETE FROM blog_posts WHERE id=?').bind(id).run();
       return json({success:true});
     }
+    if(p==='/api/admin/blog/retranslate'&&req.method==='POST'){
+      const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
+      const{id}=await req.json() as any;
+      if(!id)return json({success:false,error:'Post ID required'});
+      const post=await env.DB.prepare('SELECT * FROM blog_posts WHERE id=?').bind(id).first();
+      if(!post)return json({success:false,error:'Post not found'});
+      await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(()=>{});
+      translateBlogPost(env.DB,id,post.title,post.excerpt,post.content).catch(()=>{});
+      return json({success:true,message:'Translation started'});
+    }
     // Public blog endpoints
     if(p==='/api/blog/list'&&req.method==='GET'){
       const lang=url.searchParams.get('lang')||'en';
