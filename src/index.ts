@@ -13,6 +13,7 @@ interface Env {
 }
 const ALLOWED_ORIGIN='https://app.chatter3.com';
 const cors={'Access-Control-Allow-Origin':ALLOWED_ORIGIN,'Access-Control-Allow-Methods':'GET,POST,OPTIONS','Access-Control-Allow-Headers':'Content-Type,Authorization','Access-Control-Allow-Credentials':'true'};
+function logError(context:string,e:any){console.error(`[${context}]`,e?.message||e||'unknown error');}
 const json=(d:any,s=200)=>Response.json(d,{status:s,headers:cors});
 const uuid=()=>crypto.randomUUID();
 const todayUTC=()=>new Date().toISOString().slice(0,10);
@@ -35,7 +36,7 @@ async function ensureDailyFP(db:D1Database,uid:string){
 }
 async function sendEmail(key:string,to:string,subject:string,html:string){
   if(!key)return;
-  await fetch('https://api.resend.com/emails',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${key}`},body:JSON.stringify({from:FROM_EMAIL,to,subject,html})}).catch(()=>{});
+  await fetch('https://api.resend.com/emails',{method:'POST',headers:{'Content-Type':'application/json',Authorization:`Bearer ${key}`},body:JSON.stringify({from:FROM_EMAIL,to,subject,html})}).catch(e=>logError('email-send',e));
 }
 async function requireAdmin(db:D1Database,uid:string){
   const u:any=await db.prepare('SELECT is_admin FROM users WHERE id=? AND is_admin=1').bind(uid).first();
@@ -353,18 +354,18 @@ export default{
           const id=uuid();
           await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,is_admin,created_at,avatar_url,nickname)VALUES(?,?,?,'google_oauth_user','beginner',0,?,?,0,?,datetime('now'),?,?)`).bind(id,name,email,DAILY_FP,todayUTC(),isAdmin,pic,name).run();
           const uc=await env.DB.prepare('SELECT COUNT(*) as c FROM users').first();
-          if((uc?.c??0)<=100)await env.DB.prepare('UPDATE users SET founding_member_override=1 WHERE id=?').bind(id).run().catch(()=>{});
+          if((uc?.c??0)<=100)await env.DB.prepare('UPDATE users SET founding_member_override=1 WHERE id=?').bind(id).run().catch(e=>logError('founding-member',e));
           if(initRp>0){
             await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
-            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
+            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(e=>logError('promo-rp-insert',e));
           }
           user=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
           if(ref){
-            await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
-            await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(id).run().catch(()=>{});
-            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),id).run().catch(()=>{});
-            await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(ref).run().catch(()=>{});
-            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),ref).run().catch(()=>{});
+            await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(e=>logError('invite-update',e));
+            await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(id).run().catch(e=>logError('referral-rp-invitee',e));
+            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),id).run().catch(e=>logError('referral-tx-invitee',e));
+            await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(ref).run().catch(e=>logError('referral-rp-inviter',e));
+            await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),ref).run().catch(e=>logError('referral-tx-inviter',e));
           }
         }else{
           if(isAdmin)await env.DB.prepare('UPDATE users SET is_admin=1 WHERE id=?').bind(user.id).run();
@@ -400,17 +401,17 @@ export default{
       try{
         await env.DB.prepare(`INSERT INTO users(id,username,email,password_hash,english_level,points,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,?,?,0,?,?,0,?,?,datetime('now'))`).bind(id,username,email,passwordHash,english_level||'beginner',DAILY_FP,todayUTC(),country||'',native_language||'').run();
         const uc=await env.DB.prepare('SELECT COUNT(*) as c FROM users').first();
-        if((uc?.c??0)<=100)await env.DB.prepare('UPDATE users SET founding_member_override=1 WHERE id=?').bind(id).run().catch(()=>{});
+        if((uc?.c??0)<=100)await env.DB.prepare('UPDATE users SET founding_member_override=1 WHERE id=?').bind(id).run().catch(e=>logError('founding-member',e));
         if(initRp>0){
           await env.DB.prepare('UPDATE users SET rp_balance=? WHERE id=?').bind(initRp,id).run();
-          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
+          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,?,'promo_registration_bonus',datetime('now'))").bind(uuid(),id,initRp).run().catch(e=>logError('promo-rp-insert',e));
         }
         if(ref){
-          await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(()=>{});
-          await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(id).run().catch(()=>{});
-          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),id).run().catch(()=>{});
-          await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(ref).run().catch(()=>{});
-          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),ref).run().catch(()=>{});
+          await env.DB.prepare("UPDATE invites SET used=1,invitee_id=? WHERE inviter_id=? AND used=0").bind(id,ref).run().catch(e=>logError('invite-update',e));
+          await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(id).run().catch(e=>logError('referral-rp-invitee',e));
+          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),id).run().catch(e=>logError('referral-tx-invitee',e));
+          await env.DB.prepare('UPDATE users SET rp_balance=rp_balance+5 WHERE id=?').bind(ref).run().catch(e=>logError('referral-rp-inviter',e));
+          await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,created_at)VALUES(?,?,5,'referral_bonus',datetime('now'))").bind(uuid(),ref).run().catch(e=>logError('referral-tx-inviter',e));
         }
         const user:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(id).first();
         user.founding_member=isFoundingMember(user.founding_member_override);
@@ -505,7 +506,7 @@ export default{
     if(p.startsWith('/api/user/balances/')){
       const uid=p.split('/').pop();
       await ensureDailyFP(env.DB,uid as string);
-      await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
+      await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(e=>logError('last-active',e));
       const u:any=await env.DB.prepare('SELECT fp_balance,rp_balance,created_at,founding_member_override FROM users WHERE id=?').bind(uid).first();
       const cfg=await getSettings(env.DB);
       return json({success:true,fp:u?.fp_balance??0,rp:u?.rp_balance??0,founding_member:isFoundingMember(u?.founding_member_override),in_free_period:inFpFreePeriod(u?.created_at,cfg.promoFpFreeDays),is_new_member:isNewMember(u?.created_at,cfg.newMemberDays)});
@@ -553,7 +554,7 @@ export default{
 
     if(p.startsWith('/api/user/')&&req.method==='GET'&&!p.includes('/balances')){
       const uid=p.split('/').pop();
-      await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(()=>{});
+      await env.DB.prepare("UPDATE users SET last_active=datetime('now') WHERE id=?").bind(uid).run().catch(e=>logError('last-active',e));
       const u:any=await env.DB.prepare('SELECT * FROM users WHERE id=?').bind(uid).first();
       if(!u)return json({success:false,error:'User not found'});
       const cfg=await getSettings(env.DB);
@@ -1134,7 +1135,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const cfg=await getSettings(env.DB);
       const initRp=cfg.promoInitialRp||0;
       await env.DB.prepare("INSERT INTO users(id,username,email,password_hash,english_level,fp_balance,fp_last_reset,rp_balance,country,native_language,created_at)VALUES(?,?,?,'admin_created',?,1,?,?,?,datetime('now'))").bind(id,username,email,english_level||'beginner',todayUTC(),initRp,country||'',native_language||'').run();
-      if(initRp>0)await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,session_id,created_at)VALUES(?,?,?,'promo_registration_bonus',NULL,datetime('now'))").bind(uuid(),id,initRp).run().catch(()=>{});
+      if(initRp>0)await env.DB.prepare("INSERT INTO point_transactions(id,user_id,points,activity_type,session_id,created_at)VALUES(?,?,?,'promo_registration_bonus',NULL,datetime('now'))").bind(uuid(),id,initRp).run().catch(e=>logError('admin-create-user-rp',e));
       const user=await env.DB.prepare('SELECT id,username,nickname,email,english_level,fp_balance,rp_balance,is_admin,is_banned,ban_reason,country,native_language,created_at FROM users WHERE id=?').bind(id).first();
       return json({success:true,user});
     }
@@ -1238,14 +1239,14 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const{session_id,event_type,event_data,user_agent}=await req.json() as any;
       if(!session_id||!event_type)return json({success:false,error:'Missing fields'},400);
       const id=uuid();
-      await env.DB.prepare("INSERT INTO connection_events(id,session_id,user_id,event_type,event_data,user_agent,created_at)VALUES(?,?,?,?,?,?,datetime('now'))").bind(id,session_id,auth.userId,event_type,event_data||'{}',user_agent||'').run().catch(()=>{});
+      await env.DB.prepare("INSERT INTO connection_events(id,session_id,user_id,event_type,event_data,user_agent,created_at)VALUES(?,?,?,?,?,?,datetime('now'))").bind(id,session_id,auth.userId,event_type,event_data||'{}',user_agent||'').run().catch(e=>logError('connection-event',e));
       // Update session with connection timestamps
       if(event_type==='connected'){
-        await env.DB.prepare("UPDATE sessions SET connected_at=datetime('now') WHERE id=? AND connected_at IS NULL").bind(session_id).run().catch(()=>{});
+        await env.DB.prepare("UPDATE sessions SET connected_at=datetime('now') WHERE id=? AND connected_at IS NULL").bind(session_id).run().catch(e=>logError('session-connected',e));
       }
       if(event_type==='failed' || event_type==='disconnected'){
         const reason=event_type==='failed'?'ice_failed':'disconnected';
-        await env.DB.prepare("UPDATE sessions SET disconnect_reason=? WHERE id=? AND disconnect_reason IS NULL").bind(reason,session_id).run().catch(()=>{});
+        await env.DB.prepare("UPDATE sessions SET disconnect_reason=? WHERE id=? AND disconnect_reason IS NULL").bind(reason,session_id).run().catch(e=>logError('session-disconnect',e));
       }
       return json({success:true});
     }
@@ -1335,7 +1336,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       if(!slug||!title||!content)return json({success:false,error:'Slug, title, and content are required'});
       const id=uuid();
       await env.DB.prepare('INSERT INTO blog_posts(id,slug,title,excerpt,content,author_id,status,lang,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,datetime(\'now\'),datetime(\'now\'))').bind(id,slug,title,excerpt||'',content,auth.userId,status||'draft',lang||'en').run();
-      if(status==='published'&&lang==='en')translateBlogPost(env.DB,id,title,excerpt||'',content).catch(()=>{});
+      if(status==='published'&&lang==='en')translateBlogPost(env.DB,id,title,excerpt||'',content).catch(e=>logError('blog-translate-create',e));
       return json({success:true,id});
     }
     if(p==='/api/admin/blog/update'&&req.method==='POST'){
@@ -1344,8 +1345,8 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       if(!id)return json({success:false,error:'Post ID required'});
       await env.DB.prepare('UPDATE blog_posts SET slug=?,title=?,excerpt=?,content=?,status=?,lang=?,updated_at=datetime(\'now\') WHERE id=?').bind(slug,title,excerpt||'',content,status||'draft',lang||'en',id).run();
       if(status==='published'&&lang==='en'){
-        await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(()=>{});
-        translateBlogPost(env.DB,id,title,excerpt||'',content).catch(()=>{});
+      await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(e=>logError('blog-delete-translations-update',e));
+      translateBlogPost(env.DB,id,title,excerpt||'',content).catch(e=>logError('blog-translate-update',e));
       }
       return json({success:true});
     }
@@ -1353,7 +1354,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
       const{id}=await req.json() as any;
       if(!id)return json({success:false,error:'Post ID required'});
-      await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(()=>{});
+      await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(e=>logError('blog-delete-translations',e));
       await env.DB.prepare('DELETE FROM blog_posts WHERE id=?').bind(id).run();
       return json({success:true});
     }
@@ -1363,7 +1364,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       if(!id)return json({success:false,error:'Post ID required'});
       const post=await env.DB.prepare('SELECT * FROM blog_posts WHERE id=?').bind(id).first();
       if(!post)return json({success:false,error:'Post not found'});
-      await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(()=>{});
+      await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(e=>logError('blog-retranslate-cleanup',e));
       await translateBlogPost(env.DB,id,post.title,post.excerpt,post.content);
       return json({success:true,message:'Translations complete'});
     }
