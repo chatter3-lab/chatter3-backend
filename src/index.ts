@@ -205,12 +205,15 @@ function isNewMember(created_at:any,newMemberDays:number){
 const LANG_MAP={es:'es',ja:'ja',zh:'zh-CN',bn:'bn',fr:'fr',ar:'ar',ru:'ru'};
 async function translateText(text:string,targetLang:string):Promise<string>{
   if(!text||!targetLang)return text;
-  try{
-    const url=`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${LANG_MAP[targetLang]||targetLang}&dt=t&q=${encodeURIComponent(text)}`;
-    const r=await fetch(url);
-    const d=await r.json();
-    return d[0].map((s:any[])=>s[0]).join('');
-  }catch{return text;}
+  const tl=LANG_MAP[targetLang]||targetLang;
+  // Try multiple translation APIs
+  for(const api of [
+    ()=>fetch(`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${tl}&dt=t&q=${encodeURIComponent(text)}`).then(r=>r.json()).then(d=>d[0].map((s:any[])=>s[0]).join('')),
+    ()=>fetch(`https://api.mymemory.translated.net/get?q=${encodeURIComponent(text)}&langpair=en|${tl}`).then(r=>r.json()).then(d=>d.responseData?.translatedText||text),
+  ]){
+    try{const result=await api();if(result&&result!==text)return result;}catch{}
+  }
+  return text;
 }
 async function translateBlogPost(DB:any,postId:string,title:string,excerpt:string,content:string){
   const langs=['es','ja','zh','bn','fr','ar','ru'];
