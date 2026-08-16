@@ -201,6 +201,29 @@ function isNewMember(created_at:any,newMemberDays:number){
   return age<newMemberDays*86400000;
 }
 
+// Google Translate free API helper
+const LANG_MAP={es:'es',ja:'ja',zh:'zh-CN',bn:'bn',fr:'fr',ar:'ar',ru:'ru'};
+async function translateText(text:string,targetLang:string):Promise<string>{
+  if(!text||!targetLang)return text;
+  try{
+    const url=`https://translate.googleapis.com/translate_a/single?client=gtx&sl=auto&tl=${LANG_MAP[targetLang]||targetLang}&dt=t&q=${encodeURIComponent(text)}`;
+    const r=await fetch(url);
+    const d=await r.json();
+    return d[0].map((s:any[])=>s[0]).join('');
+  }catch{return text;}
+}
+async function translateBlogPost(DB:any,postId:string,title:string,excerpt:string,content:string){
+  const langs=['es','ja','zh','bn','fr','ar','ru'];
+  for(const lang of langs){
+    const id=crypto.randomUUID();
+    const slugSuffix=lang;
+    const [tTitle,tExcerpt,tContent]=await Promise.all([translateText(title,lang),translateText(excerpt,lang),translateText(content,lang)]);
+    const slug_row=await DB.prepare('SELECT slug FROM blog_posts WHERE id=?').bind(postId).first();
+    const baseSlug=slug_row?.slug||'post';
+    await DB.prepare('INSERT INTO blog_posts(id,slug,title,excerpt,content,author_id,status,lang,parent_id,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,?,datetime(\'now\'),datetime(\'now\'))').bind(id,`${baseSlug}-${slugSuffix}`,tTitle,tExcerpt,tContent,null,'published',lang,postId).run().catch(()=>{});
+  }
+}
+
 // ── Signaling DO ─────────────────────────────────────────────
 export class SignalingServer implements DurableObject{
   state:DurableObjectState;sessions:Set<WebSocket>;
@@ -243,6 +266,8 @@ export default{
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS password_resets(id TEXT PRIMARY KEY,user_id TEXT NOT NULL,token TEXT NOT NULL,expires_at DATETIME NOT NULL,created_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
     // Migration: blog posts table
     try{await env.DB.prepare("CREATE TABLE IF NOT EXISTS blog_posts(id TEXT PRIMARY KEY,slug TEXT UNIQUE NOT NULL,title TEXT NOT NULL,excerpt TEXT,content TEXT NOT NULL,author_id TEXT,status TEXT DEFAULT 'draft',lang TEXT DEFAULT 'en',created_at DATETIME DEFAULT CURRENT_TIMESTAMP,updated_at DATETIME DEFAULT CURRENT_TIMESTAMP)").run();}catch{}
+    // Migration: blog_posts parent_id for translations
+    try{await env.DB.prepare("ALTER TABLE blog_posts ADD COLUMN parent_id TEXT").run();}catch{}
     // Track API request (fire-and-forget)
     try{const day=todayUTC();await env.DB.prepare("INSERT INTO daily_usage(day,api_requests,d1_reads,d1_writes)VALUES(?,1,1,0)ON CONFLICT(day)DO UPDATE SET api_requests=api_requests+1,d1_reads=d1_reads+1").bind(day).run();}catch{}
 
@@ -1294,7 +1319,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
     // ── Blog Posts (Admin CRUD) ─────────────────────────────────
     if(p==='/api/admin/blog/list'&&req.method==='POST'){
       const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
-      const posts=await env.DB.prepare('SELECT id,slug,title,excerpt,status,lang,created_at,updated_at FROM blog_posts ORDER BY created_at DESC').all();
+      const posts=await env.DB.prepare('SELECT p.id,p.slug,p.title,p.excerpt,p.status,p.lang,p.created_at,p.updated_at,(SELECT COUNT(*) FROM blog_posts t WHERE t.parent_id=p.id) as translation_count FROM blog_posts p WHERE p.parent_id IS NULL ORDER BY p.created_at DESC').all();
       return json({success:true,posts:posts.results||[]});
     }
     if(p==='/api/admin/blog/create'&&req.method==='POST'){
@@ -1303,6 +1328,7 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       if(!slug||!title||!content)return json({success:false,error:'Slug, title, and content are required'});
       const id=uuid();
       await env.DB.prepare('INSERT INTO blog_posts(id,slug,title,excerpt,content,author_id,status,lang,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,datetime(\'now\'),datetime(\'now\'))').bind(id,slug,title,excerpt||'',content,auth.userId,status||'draft',lang||'en').run();
+      if(status==='published'&&lang==='en')translateBlogPost(env.DB,id,title,excerpt||'',content).catch(()=>{});
       return json({success:true,id});
     }
     if(p==='/api/admin/blog/update'&&req.method==='POST'){
@@ -1310,12 +1336,17 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const{id,slug,title,excerpt,content,status,lang}=await req.json() as any;
       if(!id)return json({success:false,error:'Post ID required'});
       await env.DB.prepare('UPDATE blog_posts SET slug=?,title=?,excerpt=?,content=?,status=?,lang=?,updated_at=datetime(\'now\') WHERE id=?').bind(slug,title,excerpt||'',content,status||'draft',lang||'en',id).run();
+      if(status==='published'&&lang==='en'){
+        await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(()=>{});
+        translateBlogPost(env.DB,id,title,excerpt||'',content).catch(()=>{});
+      }
       return json({success:true});
     }
     if(p==='/api/admin/blog/delete'&&req.method==='POST'){
       const auth=await requireAuth(env,req);if(auth instanceof Response)return auth;if(!auth.isAdmin)return json({error:'Unauthorized'},403);
       const{id}=await req.json() as any;
       if(!id)return json({success:false,error:'Post ID required'});
+      await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(()=>{});
       await env.DB.prepare('DELETE FROM blog_posts WHERE id=?').bind(id).run();
       return json({success:true});
     }
