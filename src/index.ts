@@ -220,7 +220,11 @@ async function translateBlogPost(DB:any,postId:string,title:string,excerpt:strin
     const [tTitle,tExcerpt,tContent]=await Promise.all([translateText(title,lang),translateText(excerpt,lang),translateText(content,lang)]);
     const slug_row=await DB.prepare('SELECT slug FROM blog_posts WHERE id=?').bind(postId).first();
     const baseSlug=slug_row?.slug||'post';
-    await DB.prepare('INSERT INTO blog_posts(id,slug,title,excerpt,content,author_id,status,lang,parent_id,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,?,datetime(\'now\'),datetime(\'now\'))').bind(id,`${baseSlug}-${slugSuffix}`,tTitle,tExcerpt,tContent,null,'published',lang,postId).run().catch(()=>{});
+    try{
+      await DB.prepare('INSERT INTO blog_posts(id,slug,title,excerpt,content,author_id,status,lang,parent_id,created_at,updated_at)VALUES(?,?,?,?,?,?,?,?,?,datetime(\'now\'),datetime(\'now\'))').bind(id,`${baseSlug}-${slugSuffix}`,tTitle,tExcerpt,tContent,'system','published',lang,postId).run();
+    }catch(e:any){
+      console.error(`Translation insert failed for ${lang}:`,e.message);
+    }
   }
 }
 
@@ -1357,8 +1361,8 @@ if(p==='/api/admin/stats'&&req.method==='POST'){
       const post=await env.DB.prepare('SELECT * FROM blog_posts WHERE id=?').bind(id).first();
       if(!post)return json({success:false,error:'Post not found'});
       await env.DB.prepare("DELETE FROM blog_posts WHERE parent_id=?").bind(id).run().catch(()=>{});
-      translateBlogPost(env.DB,id,post.title,post.excerpt,post.content).catch(()=>{});
-      return json({success:true,message:'Translation started'});
+      await translateBlogPost(env.DB,id,post.title,post.excerpt,post.content);
+      return json({success:true,message:'Translations complete'});
     }
     // Public blog endpoints
     if(p==='/api/blog/list'&&req.method==='GET'){
